@@ -1,0 +1,19 @@
+(module -
+  (fn main (ret i32) (params)
+    (block
+      (decl i32 (var x (call (name helper :fn) (int 2 :i32 =2) :i32)))
+      (block
+        (decl i64 (var x (int 5 :i64 =5)))
+        (expr (assign = (name x :i64) (binary + (name x :i64) (int 1 :i64 =1) :i64) :void)))
+      (for (decl i32 (var x (int 0 :i32 =0))) (binary < (name x :i32) (int 3 :i32 =3) :bool) (step (unary post++ (name x :i32) :i32))
+        (block))
+      (return (name x :i32))))
+  (fn helper (ret i32) (params (param i32 v))
+    (block
+      (decl (const i32) (var k (int 10 :i32 =10)))
+      (return (binary + (binary * (name v :i32) (name k :i32) :i32) (call (name recurse :fn) (name v :i32) :i32) :i32))))
+  (fn recurse (ret i32) (params (param i32 n))
+    (block
+      (if (binary <= (name n :i32) (int 0 :i32 =0) :bool)
+        (return (int 0 :i32 =0)))
+      (return (call (name recurse :fn) (binary - (name n :i32) (int 1 :i32 =1) :i32) :i32)))))

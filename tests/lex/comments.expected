@@ -1,0 +1,8 @@
+2:1 ident a
+2:15 ident b
+3:9 ident c
+3:31 ident d
+4:1 ident e
+5:6 ident f
+5:14 ident g
+6:1 eof

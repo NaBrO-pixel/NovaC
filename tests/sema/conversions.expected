@@ -1,0 +1,11 @@
+(module -
+  (fn f (ret void) (params (param i64 big) (param f64 real) (param bool flag))
+    (block
+      (decl i32 (var a (convert i32 (name big :i64) :i32)))
+      (decl u8 (var b (convert u8 (int 200 :{integer} =200) :u8 =200)))
+      (decl i32 (var c (convert i32 (name real :f64) :i32)))
+      (decl f32 (var d (convert f32 (name real :f64) :f32)))
+      (decl i32 (var e (convert i32 (name flag :bool) :i32)))
+      (decl i32 (var g (convert i32 (unary - (float 3.8999999999999999 :{float} =3.8999999999999999) :{float} =-3.8999999999999999) :i32 =-3)))
+      (decl f64 (var h (convert f64 (binary << (int 1 :i32 =1) (int 20 :u32 =20) :i32 =1048576) :f64 =1048576)))
+      (decl u64 (var k (convert u64 (int 255 u8 :u8 =255) :u64 =255))))))

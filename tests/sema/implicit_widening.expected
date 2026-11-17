@@ -1,0 +1,19 @@
+(module -
+  (fn widen (ret i64) (params (param i32 x))
+    (block
+      (return (implicit (name x :i32) :i64))))
+  (fn to_f64 (ret f64) (params (param f32 x))
+    (block
+      (return (implicit (name x :f32) :f64))))
+  (fn f (ret void) (params (param i8 a) (param u8 b) (param u32 c) (param i32 d) (param f32 e))
+    (block
+      (decl i16 (var x1 (implicit (name a :i8) :i16)))
+      (decl i64 (var x2 (implicit (name a :i8) :i64)))
+      (decl u16 (var x3 (implicit (name b :u8) :u16)))
+      (decl i16 (var x4 (implicit (name b :u8) :i16)))
+      (decl u64 (var x5 (implicit (name c :u32) :u64)))
+      (decl usize (var x6 (implicit (name c :u32) :usize)))
+      (decl isize (var x7 (implicit (name d :i32) :isize)))
+      (decl f64 (var x8 (implicit (name e :f32) :f64)))
+      (decl i64 (var x9 (call (name widen :fn) (implicit (name a :i8) :i32) :i64)))
+      (decl i64 (var sum (binary + (convert i64 (name d :i32) :i64) (name x2 :i64) :i64))))))

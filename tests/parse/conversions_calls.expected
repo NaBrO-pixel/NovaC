@@ -1,0 +1,13 @@
+(module -
+  (fn g (ret i32) (params (param i32 x) (param f64 y))
+    (block
+      (return (name x))))
+  (fn f (ret void) (params (param i64 big))
+    (block
+      (decl i32 (var a (convert i32 (name big))))
+      (decl u8 (var b (convert u8 (name a))))
+      (decl f64 (var c (binary * (convert f64 (name a)) (float 2))))
+      (decl bool (var d (convert bool (name a))))
+      (decl i32 (var e (convert i32 (name c))))
+      (decl i32 (var r (call (name g) (int 1) (float 2))))
+      (expr (call (name g) (call (name g) (int 1) (float 2)) (convert f64 (convert i32 (int 3))))))))

@@ -1,0 +1,10 @@
+2:1 ident a
+2:5 ident b
+3:1 ident c
+3:5 ident d
+4:1 ident x
+4:5 ident y
+5:4 ident z
+6:1 float 0
+6:7 int 2
+7:1 eof
