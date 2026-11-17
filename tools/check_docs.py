@@ -16,6 +16,10 @@ Checks:
   6. FEATURE_STATUS.md: unique IDs, statuses from the allowed vocabulary,
      each row under the section matching its status.
   7. "Phase N" references use phases 0-9 only.
+  8. The implementation agrees with the docs: the keyword list in
+     src/lex/token.h equals the documented one, and every diagnostic code
+     the compiler emits (src/) or the tests expect (tests/) is defined in
+     the docs.
 """
 
 import os
@@ -233,6 +237,36 @@ def check_feature_status():
             problem(path, f"line {lineno}: {fid} has status {status} under section '{section}'")
 
 
+def check_implementation(files):
+    token_h = os.path.join(ROOT, "src", "lex", "token.h")
+    if os.path.isfile(token_h):
+        with open(token_h, encoding="utf-8") as f:
+            text = f.read()
+        m = re.search(r"#define NC_TOKEN_KEYWORDS\(X\)(.*?)\n\n", text, re.S)
+        impl = set(re.findall(r'X\(KW_\w+, "([^"]+)"\)', m.group(1))) if m else set()
+        doc = keyword_block(os.path.join(ROOT, "docs", "NOVAC_GRAMMAR.md")) or set()
+        if impl != doc:
+            problems.append("src/lex/token.h keywords differ from NOVAC_GRAMMAR.md: only in source: "
+                            f"{sorted(impl - doc)}; only in docs: {sorted(doc - impl)}")
+
+    defined = set()
+    for path in files:
+        with open(path, encoding="utf-8") as f:
+            defined.update(re.findall(r"^\| ([EW]\d{4}) \|", f.read(), re.M))
+    for sub, pattern in (("src", r'"([EW]\d{4})"'), ("tests", r"\b(?:ERROR|WARNING)(?:@[+-]\d+)?\s+([EW]\d{4})")):
+        base = os.path.join(ROOT, sub)
+        for dirpath, _, names in os.walk(base):
+            for name in names:
+                if not name.endswith((".c", ".h", ".nc", ".py")):
+                    continue
+                path = os.path.join(dirpath, name)
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    for lineno, line in enumerate(f, 1):
+                        for code in re.findall(pattern, line):
+                            if code not in defined:
+                                problem(path, f"line {lineno}: diagnostic {code} is not defined in docs/")
+
+
 def check_phases(files):
     for path in files:
         with open(path, encoding="utf-8") as f:
@@ -252,6 +286,7 @@ def main():
     check_diag_codes(files)
     check_feature_status()
     check_phases(files)
+    check_implementation(files)
     if problems:
         print(f"check_docs: {len(problems)} problem(s):")
         for p in problems:

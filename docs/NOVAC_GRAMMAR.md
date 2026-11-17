@@ -127,9 +127,12 @@ Phase 5b (Q-07).
 == != < <= > >=
 ```
 
-Maximal munch applies, with one parser-level exception: inside generic
-argument lists, `>>` and `>>=` are split so that `optional<slice<u8>>`
-closes two lists.
+Maximal munch applies, except that `>>` and `>>=` are not single tokens:
+the lexer emits `>` `>` and `>` `>=`, marking the first `>` as *joint*
+(immediately followed by the next token). In expression context the
+parser combines a joint `>` with a following `>` into the shift operator
+`>>` and with a following `>=` into `>>=`; in a generic argument list each
+`>` closes one list, so `optional<slice<u8>>` closes two.
 
 ## 3. Modules and top-level declarations
 
@@ -287,6 +290,16 @@ expression statement. Backtracking is bounded by the length of the type.
 
 **Dangling `else`** binds to the nearest `if`, as in C.
 
+**Struct literals.** In expression position, an identifier, a dotted path
+or `Self`, optionally followed by generic arguments, that is immediately
+followed by `{` begins a struct literal (`Point{...}`, `Vec<i32>{...}`).
+No other valid expression has that shape, so the rule needs no symbol
+table.
+
+**Missing `;` at the end of a line** is reported (E2001) and parsing
+continues as if it were present (error recovery only; the program is still
+rejected).
+
 ## 6. Expressions
 
 Precedence, highest first. All binary levels are left-associative unless
@@ -364,18 +377,26 @@ contents are a primitive type the parser reports **E2031** with the fix-it
 | Code | Condition |
 | --- | --- |
 | E1001 | unterminated block comment |
+| E1002 | unexpected character (including non-ASCII outside comments and strings) |
+| E1003 | source file begins with a byte-order mark |
 | E1010 | preprocessor directive (`#include`, `#define`, …) |
 | E1020 | leading-zero decimal literal |
 | E1021 | float literal without digits on both sides of `.` |
 | E1022 | unknown literal suffix |
 | E1023 | integer literal does not fit in 64 bits |
+| E1024 | malformed numeric literal (no digits after a base prefix, digit invalid for the base, misplaced `_`, hexadecimal float without exponent) |
+| E1025 | floating-point literal out of range for `f64` |
 | E1030 | unterminated string or character literal |
+| E1031 | invalid escape sequence (including `\u{...}` in a character literal) |
+| E1032 | invalid character literal (empty, more than one character, non-ASCII) |
 | E2001 | unexpected token (generic) |
 | E2010 | chained relational/equality operator (`a < b < c`) |
 | E2020 | C-style array declarator (`int a[4]`) — fix-it `i32[4] a` |
 | E2031 | C-style cast — fix-it `T(x)` |
 | E2050 | `switch` case falls through without `fallthrough;` |
+| E2060 | `goto` (not supported, D-034) |
 | E9001 | construct recognised but not implemented in this version |
+| E9004 | syntax tree deeper than the implementation limit of 1000 levels (nesting, operator chains, postfix chains and type suffixes all count) |
 
 The full diagnostic code allocation is in
 [NOVAC_COMPILER_ARCHITECTURE.md §6](NOVAC_COMPILER_ARCHITECTURE.md#6-diagnostics).
