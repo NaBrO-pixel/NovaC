@@ -1,0 +1,100 @@
+# NovaC
+
+NovaC is a C-derived systems programming language being designed for the
+NovarisOS ecosystem. It aims to combine C-like syntax and hardware control
+with compile-time ownership and borrow checking, LLVM-based native code
+generation, C ABI interoperability, and freestanding compilation for
+kernels and drivers. It has no garbage collector and requires no runtime.
+
+> **Project status: specification only (Phase 1 complete).**
+> There is no compiler yet. No NovaC program can be compiled, checked or
+> run today. The documents below describe the language as designed, not
+> as implemented. [docs/FEATURE_STATUS.md](docs/FEATURE_STATUS.md) is the
+> authoritative record of what works.
+
+## What exists today
+
+| Implemented | Where |
+| --- | --- |
+| Phase 0 investigation of NovarisOS and LibNovaC | [docs/NOVARISOS_INTEGRATION.md](docs/NOVARISOS_INTEGRATION.md) |
+| Phase 1 language specification | [docs/](docs/) |
+| Documentation consistency checker | `tools/check_docs.py` (`make check-docs`) |
+
+Next: **Phase 2**, the compiler front end (lexer, parser, name resolution
+and type checking for a first language subset). See the plan in
+[docs/NOVAC_ROADMAP.md](docs/NOVAC_ROADMAP.md#phase-2--compiler-foundation).
+
+## A taste of the designed language
+
+*Not yet compilable.*
+
+```c
+module demo;
+import std.io;
+
+u32 sum(slice<const u32> xs) {          // shared borrow; indexing is bounds-checked
+    u32 total = 0;
+    for (usize i = 0; i < xs.len; i++) {
+        total += xs[i];                  // panics on overflow, never undefined behaviour
+    }
+    return total;
+}
+
+int main(void) {
+    u32[4] values = { 1, 2, 3, 4 };
+    io.println("sum = {}", sum(&values)); // format string checked at compile time
+    return 0;
+}
+```
+
+## Documentation
+
+| Document | Contents |
+| --- | --- |
+| [NOVAC_SPEC.md](docs/NOVAC_SPEC.md) | language overview, declarations, statements, attributes, examples |
+| [NOVAC_GRAMMAR.md](docs/NOVAC_GRAMMAR.md) | normative syntax (EBNF) |
+| [NOVAC_TYPE_SYSTEM.md](docs/NOVAC_TYPE_SYSTEM.md) | types, integer semantics, conversions, generics |
+| [NOVAC_MEMORY_MODEL.md](docs/NOVAC_MEMORY_MODEL.md) | safe / controlled / kernel modes, ownership, borrowing, unsafe, concurrency |
+| [NOVAC_ABI.md](docs/NOVAC_ABI.md) | targets, data layout, calling conventions, C interop, NovarisOS specifics |
+| [NOVAC_COMPILER_ARCHITECTURE.md](docs/NOVAC_COMPILER_ARCHITECTURE.md) | compiler pipeline and subsystems |
+| [NOVAC_ROADMAP.md](docs/NOVAC_ROADMAP.md) | phases, exit criteria, Phase 2 plan |
+| [NOVAC_DECISIONS.md](docs/NOVAC_DECISIONS.md) | architectural decision records, open questions |
+| [FEATURE_STATUS.md](docs/FEATURE_STATUS.md) | implemented / planned / open / unsupported |
+| [NOVARISOS_INTEGRATION.md](docs/NOVARISOS_INTEGRATION.md) | Phase 0 report, integration requirements, risks |
+
+## The NovarisOS ecosystem
+
+NovaC is one of several separate projects:
+
+- **NovaC** (this repository) — the language, its compiler (`ncc`, planned)
+  and its own libraries (`core`, `alloc`, `std`, planned).
+- **[LibNovaC](https://github.com/NaBrO-pixel/LibNovaC)** — the C standard
+  library for NovarisOS. NovaC is not LibNovaC; hosted NovaC programs on
+  NovarisOS will call LibNovaC through the C ABI.
+- **[NovarisOS](https://github.com/NaBrO-pixel/NovarisOS)** — the
+  operating system (x86-64).
+- **libNova-Sys**, **Nova Runtime**, **Nova Linker** — planned ecosystem
+  components that do not exist yet. NovaC is designed not to depend on
+  them.
+
+## Building and checking
+
+Only documentation checks exist at this stage:
+
+```bash
+make check-docs
+```
+
+Requirements: Python 3, GNU Make. Phase 2 will add a C11 compiler (GCC ≥ 13
+or Clang ≥ 18); Phase 3 adds LLVM ≥ 18 with development headers.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Changes are recorded in
+[CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+PolyForm Noncommercial License 1.0.0 — see [LICENSE](LICENSE). How this
+applies to programs compiled with NovaC is an open question (Q-01 in
+[NOVAC_DECISIONS.md](docs/NOVAC_DECISIONS.md#outstanding-questions)).
