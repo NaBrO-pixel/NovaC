@@ -601,6 +601,50 @@ append-only. Self-hosting the compiler is a post-1.0 consideration, not a
 roadmap commitment. Performance claims require reproducible benchmarks
 committed with their harness (no benchmark results exist yet).
 
+## D-037 — Implicit conversions only at coercion sites; untyped constants
+
+**Status:** Accepted (Phase 2)
+
+**Context.** Phase 1 contained a contradiction found while implementing
+the type checker: NOVAC_TYPE_SYSTEM.md §2.2 said binary operands "must
+have the same type after implicit conversion", which would make
+`i32 + u8` valid (u8 widens losslessly to i32), while
+NOVAC_COMPILER_ARCHITECTURE.md used `i32 + u8` as its example of error
+E4010.
+
+**Options.** (a) Widen operands implicitly to a common type (C's usual
+arithmetic conversions, restricted to lossless cases). (b) Require
+identical operand types; widen only where a value flows into a place of
+known type.
+
+**Decision.** (b). Implicit widening (NOVAC_TYPE_SYSTEM.md §5.1) applies
+only at *coercion sites*: initialisation, assignment, function arguments
+and `return`. Between the operands of a binary operator, typed operands
+must have identical types (E4010). Untyped constants (unsuffixed literals
+and constant expressions of them) adopt the other operand's type, or the
+expected type, and are evaluated exactly; operators that depend on a width
+give two untyped operands the expected integer type, otherwise `i32`.
+
+**Consequences.** Mixed-width arithmetic is written with an explicit
+conversion (`i64(a) + b`), so the width of every operation is visible in
+the source. The typed AST records each implicit widening as an explicit
+`implicit` node for later phases.
+
+## D-038 — A variable may not be used in its own initialiser
+
+**Status:** Accepted (Phase 2)
+
+**Context.** In C a variable's scope begins at its declarator, so
+`int x = x;` reads an indeterminate value (undefined behaviour). If NovaC
+instead began the scope after the initialiser, `i32 x = 1; { i32 x = x; }`
+would silently read the *outer* `x` — a C-looking program with a different
+meaning, which D-011 forbids.
+
+**Decision.** The scope begins at the declarator, as in C, and any use of
+the variable inside its own initialiser is an error (E3003). Earlier
+declarators in the same declaration are already initialised and may be
+used (`i32 a = 1, b = a;`).
+
 ---
 
 ## Outstanding questions

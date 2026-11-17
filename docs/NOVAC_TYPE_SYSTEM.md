@@ -43,9 +43,11 @@ must not assume they are interchangeable. 128-bit integers are planned
 ### 2.2 Integer operations
 
 Arithmetic is performed **in the operand type**. Both operands of a binary
-arithmetic, bitwise or comparison operator must have the same type after
-implicit conversion (§5); there are no integer promotions and no "usual
-arithmetic conversions".
+arithmetic, bitwise or comparison operator must have the **same type**.
+Implicit conversions (§5.1) are *not* applied between operands (D-037):
+`i32 + i64` is E4010, written `i64(a) + b`. There are no integer
+promotions and no "usual arithmetic conversions". An untyped constant
+operand takes the type of the other operand.
 
 | Operation | Result |
 | --- | --- |
@@ -59,7 +61,14 @@ arithmetic conversions".
 | `++x`, `x++`, `--x`, `x--` | as `x += 1` / `x -= 1`, including the overflow panic |
 
 Compile-time constant expressions that would panic are compile errors
-(E4040).
+(E4040). Operators whose result depends on a width (wrapping arithmetic,
+`&`, `|`, `^`, `~`, shifts) give untyped constant operands the expected
+type if it is an integer type, otherwise `i32`; `+ - * / %` and
+comparisons between untyped constants are evaluated exactly.
+
+`%` is not defined for floating-point types (E4011). `&`, `|` and `^` also
+apply to `bool` (without short-circuiting). The right operand of a shift
+must have an unsigned integer type or be a non-negative constant (E4013).
 
 In `controlled` and `kernel` modules, `@overflow(wrap)` on a function or
 the module declaration changes `+ - * ++ -- unary-` to wrap (D-016).
@@ -356,7 +365,8 @@ objects (dynamic dispatch) are Open (Q-09).
 - Generic arguments are inferred from call arguments and the expected
   type. Inference is local to one function body; function signatures are
   always explicit.
-- `const auto` declares an immutable binding.
+- `const auto` declares an immutable binding. An immutable binding must
+  have an initialiser (E4065); a mutable one may be initialised later.
 
 ## 9. Constant evaluation
 
@@ -381,13 +391,25 @@ everything else. `typedef` introduces an alias, not a new type.
 | E4002 | wrong number of arguments in a call |
 | E4003 | called expression is not a function |
 | E4004 | assignment to an immutable binding or a non-place expression |
+| E4005 | variable or parameter of type `void` |
+| E4006 | expression of type `void` used as a value |
+| E4007 | invalid explicit conversion (to `bool`, from `bool` to a float, to or from `void`) |
+| E4008 | `return;` without a value in a function that returns a value |
+| E4009 | `return` with a value in a `void` function |
 | E4010 | binary operator on operands of different types |
+| E4011 | operator not defined for the operand type (e.g. `%` on floats, `<` on `bool`, `!` on integers) |
 | E4012 | unary `-` on unsigned operand |
+| E4013 | shift amount that is not an unsigned integer or is a negative constant |
 | E4020 | non-`bool` condition |
 | E4030 | assignment used as a value (D-024) |
 | E4040 | constant expression panics |
 | E4041 | literal out of range for its type |
 | E4050 | invalid memory ordering for the operation |
+| E4062 | `break` or `continue` outside a loop |
+| E4064 | `auto` variable without an initialiser |
+| E4065 | immutable variable without an initialiser |
+| W4001 | expression statement whose result is unused |
+| W4002 | division by a constant zero (always panics at run time) |
 
 E7010 (floating point on a target without an FPU, §2.3) is defined with
 the other target codes in [NOVAC_ABI.md §13](NOVAC_ABI.md#13-diagnostics-abi).

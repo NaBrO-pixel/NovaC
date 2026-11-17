@@ -163,6 +163,12 @@ i32 a = 1, b = 2;       // several declarators share the type
 i32 later;              // must be definitely assigned before use (E5031)
 ```
 
+A local variable's scope begins at its declarator, as in C, but using it
+inside its own initialiser is an error (E3003): in C `int x = x;` reads an
+indeterminate value, and NovaC neither repeats that nor silently reads an
+outer `x` (D-011). Earlier declarators of the same declaration are in
+scope: `i32 a = 1, b = a;` is valid.
+
 ### 6.3 Module-level items
 
 ```c
@@ -411,6 +417,7 @@ here:
 | --- | --- |
 | E3001 | use of an undeclared name |
 | E3002 | redefinition of a name in the same scope |
+| E3003 | a variable used in its own initialiser |
 | E3011 | C type name (`char`, `long`, `short`, `unsigned`, …) used (D-031) |
 | E3020 | user declaration of a reserved `__` identifier |
 | E3030 | imported name collides with a declaration |

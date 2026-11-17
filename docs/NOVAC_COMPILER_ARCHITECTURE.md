@@ -73,8 +73,9 @@ per-stage memory arenas (§5.1) and are freed when no longer needed.
 
 ```text
 src/
-  driver/     main.c, options.c/.h        command line, orchestration, linking
-  support/    arena, strtab (interning), vec, hashmap, source manager, utf8
+  driver/     main.c, options.c/.h, frontend.c/.h   command line, pipeline, linking
+  session/    session.c/.h                the per-invocation state passed to every stage
+  support/    arena, strtab (interning), vec, source manager, common
   diag/       diagnostics engine and rendering
   lex/        token.h, lexer.c/.h
   ast/        ast.h, ast.c, ast_dump.c
@@ -89,9 +90,9 @@ tests/        see §12
 tools/        check_docs.py and other maintenance scripts
 ```
 
-Phase 2 creates `driver`, `support`, `diag`, `lex`, `ast`, `parse` and
-the Phase 2 subset of `sema` only. Directories for later phases are not
-created until they contain working code.
+Phase 2 created `driver`, `session`, `support`, `diag`, `lex`, `ast`,
+`parse` and the Phase 2 subset of `sema`. Directories for later phases are
+not created until they contain working code.
 
 ## 5. Core infrastructure (`support/`)
 
@@ -160,8 +161,10 @@ Warnings use `W` with the same ranges. Codes defined in this document:
 | E0002 | unknown command-line option |
 | E0003 | invalid option value |
 | E0004 | no input files |
+| E0005 | input file too large (4 GiB or more) |
 | E8010 | object compiled against a different interface hash of an imported module |
 | E9002 | command-line option recognised but not implemented in this version |
+| E9003 | code generation requested (the default action) but not implemented in this version |
 
 ### 6.3 Error recovery
 
@@ -169,8 +172,14 @@ The parser recovers at synchronisation points (`;`, `}`, and the start of
 a top-level declaration keyword) so one mistake yields one diagnostic.
 Name resolution and type checking assign an *error type* to erroneous
 expressions; the error type is compatible with everything, which
-suppresses cascades. Later stages (NIR, analysis, codegen) never run on a
-module that has errors.
+suppresses cascades.
+
+**Stage gating.** Each stage runs only if the earlier stages reported no
+errors for the module: the parser does not run after lexical errors (the
+lexer drops invalid characters, so parsing the rest would mostly report
+consequences of the same mistake), semantic analysis does not run after
+syntax errors, and later stages never run on a module with errors.
+`--dump-tokens` prints the token stream even after lexical errors.
 
 ## 7. Front end
 
@@ -362,6 +371,9 @@ implemented is rejected with E9002, not ignored.
 | `tests/abi/` | NovaC ↔ C cross-calls (NOVAC_ABI.md §12) | same | 4 |
 | `tests/borrow/` | ownership/borrow positive and negative tests | same | 5 |
 | `tests/regress/` | one test per fixed bug, named by issue | same | from 2 |
+| `tests/driver/` | command-line behaviour (exit status, option errors) | `tests/run_tests.py` | 2 |
+| `tests/selftest/` | fixtures the runner must reject (`--selftest`) | `tests/run_tests.py` | 2 |
+| `tests/fuzz/` | libFuzzer harness and dictionary for the front end | `make fuzz-run` | 2 |
 | `bench/` | benchmark workloads in NovaC and C, harness | `bench/run.py` | 8 |
 
 **Inline diagnostic expectations** in `tests/diag/*.nc`:
@@ -382,8 +394,16 @@ missing or unexpected diagnostic.
 Golden files are updated only with `make test UPDATE=1`, and the
 resulting diff must be reviewed in the commit.
 
-**Fuzzing** (Phase 2 exit criterion): a libFuzzer harness over the lexer
-and parser built with Clang; the corpus seeds from `tests/`.
+**Fuzzing** (Phase 2 exit criterion): `tests/fuzz/fuzz_frontend.c` runs
+lexing, parsing and semantic analysis on arbitrary bytes, built with Clang,
+libFuzzer, ASan and UBSan (`make fuzz-run FUZZ_SECONDS=1800`; requires
+Clang's runtime libraries, e.g. Ubuntu's `libclang-rt-18-dev`). The corpus
+is seeded from `tests/`; the dictionary holds the keywords and
+punctuators.
+
+**Build directories.** `build/<config>-<cc>/` (e.g. `build/debug-gcc/`), so
+GCC, Clang, release and sanitizer builds coexist. `make test-all` runs the
+sanitizer test suite with both compilers.
 
 **Benchmarks** (Phase 8): each workload has equivalent NovaC and C
 sources; C is built with GCC and Clang at matching optimisation levels.
@@ -396,7 +416,8 @@ published that the harness did not produce.**
 
 | Subsystem | Public header | Provides | Depends on |
 | --- | --- | --- | --- |
-| support | `support/*.h` | arenas, interning, vectors, maps, source files, spans | libc only |
+| support | `support/*.h` | arenas, interning, vectors, source files, spans | libc only |
+| session | `session/session.h` | `nc_session`: source map, string table, diagnostics, arena | support, diag |
 | diag | `diag/diag.h` | `nc_diag_error(session, span, code, fmt, ...)`, rendering, counts | support |
 | lex | `lex/lexer.h` | `nc_lex_file(session, file) -> token array` | support, diag |
 | ast | `ast/ast.h` | node types, constructors, `nc_ast_dump` | support |
