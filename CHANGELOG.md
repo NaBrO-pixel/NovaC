@@ -28,6 +28,12 @@ released versions yet.
   `src/lex/token.h` and every diagnostic code used in `src/` and `tests/`
   are defined in the specification.
 
+### Verified
+
+- Fuzzing (`make fuzz-run FUZZ_SECONDS=1800`) of commit `1ab9c6c`:
+  9,732,975 inputs in 30 minutes, no crash, leak, timeout or sanitizer
+  report.
+
 ### Fixed during Phase 2 review
 
 - A very long operator chain (`a + a + ...`, 200,000 terms) built a

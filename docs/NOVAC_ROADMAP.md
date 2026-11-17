@@ -9,7 +9,7 @@ repository. Feature-level status is in [FEATURE_STATUS.md](FEATURE_STATUS.md).
 | --- | --- | --- |
 | 0 | Repository and architecture investigation | ✅ Complete |
 | 1 | Formal specification | ✅ Complete (this commit series) |
-| 2 | Compiler foundation | ⏳ Implemented; final fuzzing run in progress |
+| 2 | Compiler foundation | ✅ Complete |
 | 3 | Native compilation | ⏳ Next |
 | 4 | C interoperability (plus aggregates, raw pointers, unsafe) | Planned |
 | 5 | Memory safety | Planned |
@@ -56,17 +56,18 @@ from the allowed vocabulary.
 
 ## Phase 2 — Compiler foundation
 
-**Result.** All steps below are done. Exit criteria 1, 2, 4 and 5 are met;
-criterion 3 (a 30-minute fuzzing run on the final code) is in progress and
-its result will be recorded here and in CHANGELOG.md. So far:
+**Result.** All steps below are done and every exit criterion is met:
 `make test-all` passes with GCC 13 and Clang 18 under ASan, UBSan and
 LeakSanitizer (4,296 unit-test checks; 80 runner tests: 7 lexer, 8
 parser and 6 type-checker golden tests, 38 diagnostic tests, 2
 regression tests, 1 example program, 18 command-line cases; plus 6
 runner self-test fixtures); every diagnostic
 code Phase 2 can emit has a negative test except E0005 (it needs an input
-file of 4 GiB or more); and two earlier fuzzing runs (433,000 and 2.1
-million inputs, on code before the last parser change) found nothing. Specification changes made while
+file of 4 GiB or more); and a 30-minute libFuzzer run on the final code
+(commit `1ab9c6c`, Clang 18, ASan + UBSan, inputs up to 4 KiB) executed
+9,732,975 inputs with no crash, leak, timeout or sanitizer report. Two
+earlier runs on preceding versions (433,000 and 2.1 million inputs) also
+found nothing. Specification changes made while
 implementing are recorded as D-037 and D-038.
 
 **Goal:** `ncc --check file.nc` lexes, parses, resolves and type-checks
@@ -109,7 +110,7 @@ E1020, E1021, E2020, E2031, E3011). Definite initialisation (E5031) is
 | 2.8 | libFuzzer harness for lexer+parser+sema (`make fuzz`, Clang only) | ≥ 30 minutes per harness with no crash, leak or sanitizer report; any finding becomes a `tests/regress/` case |
 | 2.9 | Documentation: FEATURE_STATUS.md, README "implemented" list, CHANGELOG, `ncc --help` text | `make check-docs` |
 
-### Exit criteria
+### Exit criteria (all met)
 
 1. `make test` passes with both `CC=gcc` and `CC=clang`, in the
    sanitizer configuration.
