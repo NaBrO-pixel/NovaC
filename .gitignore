@@ -1,0 +1,42 @@
+# Build output (everything the Makefile produces goes under build/)
+build/
+
+# Objects, archives, binaries and LLVM artefacts produced outside build/
+*.o
+*.a
+*.so
+*.so.*
+*.bc
+*.elf
+/ncc
+
+# Compiler-generated dependency files
+*.d
+
+# Fuzzing and profiling output
+fuzz/corpus-*/
+crash-*
+leak-*
+timeout-*
+oom-*
+*.profraw
+*.profdata
+perf.data*
+
+# Benchmark run output (results worth keeping are committed deliberately elsewhere)
+bench/out/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editors and OS files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Claude Code local settings (machine-specific; may hold credentials)
+.claude/settings.local.json
+.claude/worktrees/

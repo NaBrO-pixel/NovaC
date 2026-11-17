@@ -1,0 +1,117 @@
+# NovaC Feature Status
+
+This is the **single source of truth** for what NovaC can do (D-036). If a
+feature is not listed as **Implemented** here, it does not work, whatever
+other documents describe.
+
+Status vocabulary (checked by `tools/check_docs.py`):
+
+| Status | Meaning |
+| --- | --- |
+| Implemented | works, and has tests in this repository (the Reference column names them) |
+| Planned | specified; scheduled for the named phase; no code exists |
+| Open | design not decided (see the question in NOVAC_DECISIONS.md) |
+| Unsupported | deliberately not part of NovaC, or out of scope for version 1 |
+
+Last updated: Phase 1.
+
+## Implemented
+
+| ID | Feature | Status | Phase | Reference |
+| --- | --- | --- | --- | --- |
+| F-001 | Phase 1 specification documents | Implemented | 1 | `docs/` |
+| F-002 | Documentation consistency checker | Implemented | 1 | `tools/check_docs.py`, `make check-docs` |
+
+**The compiler does not exist yet.** No NovaC program can be compiled,
+checked or run.
+
+## Planned
+
+| ID | Feature | Status | Phase | Reference |
+| --- | --- | --- | --- | --- |
+| F-100 | `ncc` driver, option parsing, `--version`/`--help` | Planned | 2 | NOVAC_COMPILER_ARCHITECTURE.md §11 |
+| F-101 | Diagnostics engine with codes, excerpts, fix-its | Planned | 2 | NOVAC_COMPILER_ARCHITECTURE.md §6 |
+| F-102 | Lexer (complete token set), `--dump-tokens` | Planned | 2 | NOVAC_GRAMMAR.md §2 |
+| F-103 | Parser and AST for the [P2] subset, `--dump-ast` | Planned | 2 | NOVAC_GRAMMAR.md |
+| F-104 | Name resolution (single module) | Planned | 2 | NOVAC_COMPILER_ARCHITECTURE.md §7.4 |
+| F-105 | Type checking of primitive types, literals, operators, conversions | Planned | 2 | NOVAC_TYPE_SYSTEM.md §2, §5 |
+| F-106 | Test runner, golden and inline-diagnostic tests | Planned | 2 | NOVAC_COMPILER_ARCHITECTURE.md §12 |
+| F-107 | Fuzzing harness for the front end | Planned | 2 | NOVAC_ROADMAP.md step 2.8 |
+| F-200 | NIR, lowering, verifier | Planned | 3 | NOVAC_COMPILER_ARCHITECTURE.md §9.1 |
+| F-201 | LLVM IR generation and object emission | Planned | 3 | NOVAC_COMPILER_ARCHITECTURE.md §9.4 |
+| F-202 | Checked integer arithmetic and conversions (panics) | Planned | 3 | NOVAC_TYPE_SYSTEM.md §2.2 |
+| F-203 | Optimisation levels `-O0`…`-Ofast` | Planned | 3 | NOVAC_COMPILER_ARCHITECTURE.md §10 |
+| F-204 | Hosted linking on x86_64-linux-gnu | Planned | 3 | NOVAC_ABI.md §8 |
+| F-205 | Cross-compiled objects for AArch64 and RISC-V 64 | Planned | 3 | NOVAC_ABI.md §2 |
+| F-206 | DWARF line tables | Planned | 3 | D-035 |
+| F-300 | Structs, unions, enums, arrays, typedef, statics, `switch` | Planned | 4 | NOVAC_TYPE_SYSTEM.md §3 |
+| F-301 | Raw pointers | Planned | 4 | NOVAC_TYPE_SYSTEM.md §3.6 |
+| F-302 | Modes, `unsafe` blocks and functions, unsafe-operation checks | Planned | 4 | NOVAC_MEMORY_MODEL.md §2, §6 |
+| F-303 | `extern "C"` import/export, FFI-safety checks | Planned | 4 | NOVAC_ABI.md §11 |
+| F-304 | C ABI lowering: x86-64 SysV, AArch64, RISC-V LP64D | Planned | 4 | NOVAC_ABI.md §5 |
+| F-305 | ABI conformance tests against Clang | Planned | 4 | NOVAC_ABI.md §12 |
+| F-306 | `x86_64-novaris` target linking LibNovaC | Planned | 4 | NOVAC_ABI.md §10.1 |
+| F-400 | References, borrow checking (non-lexical), two-phase borrows | Planned | 5 | NOVAC_MEMORY_MODEL.md §4 |
+| F-401 | Ownership, moves, destructors, drop flags | Planned | 5 | NOVAC_MEMORY_MODEL.md §3 |
+| F-402 | Definite initialisation | Planned | 5 | NOVAC_MEMORY_MODEL.md §5.2 |
+| F-403 | Lifetime elision | Planned | 5 | NOVAC_MEMORY_MODEL.md §5.1 |
+| F-404 | Explicit lifetimes, references in structs | Planned | 5 | Q-07 |
+| F-405 | Bounds checks and check elimination | Planned | 5 | NOVAC_MEMORY_MODEL.md §7 |
+| F-406 | `impl` blocks and methods | Planned | 5 | NOVAC_TYPE_SYSTEM.md §6 |
+| F-500 | Modules, imports, `.nci` interfaces, separate compilation | Planned | 6 | D-019 |
+| F-501 | Generics and interfaces (monomorphised) | Planned | 6 | D-033 |
+| F-502 | `optional`, `result`, `try`, `is` | Planned | 6 | NOVAC_TYPE_SYSTEM.md §4 |
+| F-503 | Slices and `str` | Planned | 6 | NOVAC_TYPE_SYSTEM.md §3.8 |
+| F-504 | Compile-time evaluation, `constexpr` functions | Planned | 6 | NOVAC_TYPE_SYSTEM.md §9 |
+| F-505 | `@cfg` conditional compilation | Planned | 6 | NOVAC_SPEC.md §10 |
+| F-506 | `defer` | Planned | 6 | D-034 |
+| F-507 | `core`, `alloc`, `std` libraries (initial) | Planned | 6 | D-021 |
+| F-508 | Compile-time-checked formatting | Planned | 6 | NOVAC_SPEC.md §13.1 |
+| F-600 | Freestanding targets (x86-64, AArch64, RISC-V) | Planned | 7 | NOVAC_ABI.md §2 |
+| F-601 | `x86_64-novaris-kernel` target | Planned | 7 | NOVAC_ABI.md §10.2 |
+| F-602 | Inline assembly, `@naked` | Planned | 7 | D-028 |
+| F-603 | `@interrupt` (x86-64, RISC-V) | Planned | 7 | NOVAC_ABI.md §6.1 |
+| F-604 | `mmio<T>`, volatile intrinsics, `core.arch` | Planned | 7 | NOVAC_MEMORY_MODEL.md §8.5 |
+| F-605 | `@panic_handler`, `@section`, `@used` | Planned | 7 | NOVAC_ABI.md §9 |
+| F-700 | `atomic<T>`, fences, memory orderings | Planned | 8 | NOVAC_MEMORY_MODEL.md §8 |
+| F-701 | `Send`/`Sync` | Planned | 8 | NOVAC_MEMORY_MODEL.md §8.2 |
+| F-702 | `std.thread`, `std.sync` (Linux first) | Planned | 8 | NOVAC_MEMORY_MODEL.md §8.3 |
+| F-703 | LTO, PGO | Planned | 8 | NOVAC_COMPILER_ARCHITECTURE.md §10 |
+| F-704 | Benchmark suite vs GCC and Clang | Planned | 8 | NOVAC_COMPILER_ARCHITECTURE.md §12 |
+| F-800 | JSON diagnostics | Planned | 9 | NOVAC_COMPILER_ARCHITECTURE.md §6 |
+| F-801 | Reproducible builds | Planned | 9 | NOVAC_ROADMAP.md Phase 9 |
+| F-802 | C header generation for exports (`--emit-c-header`) | Planned | 6 | NOVAC_ABI.md §11.2 |
+| F-803 | C header binding generator (separate tool, libclang) | Planned | 9 | D-004 |
+| F-804 | Stack probes, stack-size reports | Planned | 7 | NOVAC_ABI.md §9.3 |
+| F-805 | 128-bit integers, `f16`, `f128` | Planned | 8 | NOVAC_TYPE_SYSTEM.md §2 |
+
+## Open
+
+| ID | Feature | Status | Phase | Reference |
+| --- | --- | --- | --- | --- |
+| F-900 | Closures / lambdas | Open | 6 | Q-05 |
+| F-901 | General tagged unions and pattern matching | Open | 6 | Q-06 |
+| F-902 | Interface objects / dynamic dispatch | Open | 6 | Q-09 |
+| F-903 | Package manifest and dependency management | Open | 6 | Q-08 |
+| F-904 | Language-level async | Open | 8 | D-029, Q-10 |
+| F-905 | Runtime/library licensing for compiled programs | Open | 3 | Q-01 |
+
+## Unsupported
+
+| ID | Feature | Status | Phase | Reference |
+| --- | --- | --- | --- | --- |
+| F-950 | C source compatibility (compiling C code) | Unsupported | — | NOVAC_ABI.md §1 |
+| F-951 | C preprocessor, `#include`, macros | Unsupported | — | D-004 |
+| F-952 | Garbage collection | Unsupported | — | NOVAC_MEMORY_MODEL.md §1 |
+| F-953 | Exceptions and stack unwinding | Unsupported | — | D-015 |
+| F-954 | 32-bit targets, big-endian targets | Unsupported | — | D-023 |
+| F-955 | PE/COFF and Mach-O output | Unsupported | — | D-023 |
+| F-956 | NovarisOS on AArch64 / RISC-V (no such OS port exists) | Unsupported | — | D-023 |
+| F-957 | Implicit integer promotions, undefined overflow | Unsupported | — | D-009 |
+| F-958 | C-style casts, declarator syntax, leading-zero octal | Unsupported | — | D-005, D-010, D-030 |
+| F-959 | `char`/`short`/`long`/`unsigned` type names | Unsupported | — | D-031 |
+| F-960 | `goto` | Unsupported | — | D-034 |
+| F-961 | Function overloading | Unsupported | — | NOVAC_SPEC.md §6.1 |
+| F-962 | Bitfields, flexible array members, `long double`, `va_list`, defining variadic functions | Unsupported | — | NOVAC_ABI.md §11.4 |
+| F-963 | `volatile` type qualifier | Unsupported | — | D-027 |
+| F-964 | C++ interoperability | Unsupported | — | NOVAC_ABI.md §1 |
