@@ -35,8 +35,15 @@ to every change.
 
 - Development happens on the `dev` branch or on topic branches merged
   into it.
-- Before committing: `make check-docs` and (from Phase 2) `make test`
-  must pass; inspect `git diff` and `git status`.
+- Before committing: `make test-all` (sanitizer builds with GCC and Clang,
+  all tests, documentation checks) must pass; inspect `git diff` and
+  `git status`.
+- A new diagnostic needs a code defined in `docs/` and a negative test in
+  `tests/diag/` with an inline `// ERROR Ennnn` expectation;
+  `tools/check_docs.py` rejects codes that are used but undefined.
+- Golden files (`.expected`) are regenerated with `make test UPDATE=1`;
+  read the resulting diff before committing it.
+- A bug fix comes with a test in `tests/regress/` that fails without it.
 - Commit messages: an imperative summary line under 72 characters
   ("Add lexer for integer literals"), a blank line, then what changed and
   why. One logical change per commit.

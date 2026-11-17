@@ -13,30 +13,40 @@ Status vocabulary (checked by `tools/check_docs.py`):
 | Open | design not decided (see the question in NOVAC_DECISIONS.md) |
 | Unsupported | deliberately not part of NovaC, or out of scope for version 1 |
 
-Last updated: Phase 1.
+Last updated: Phase 2.
 
 ## Implemented
 
 | ID | Feature | Status | Phase | Reference |
 | --- | --- | --- | --- | --- |
 | F-001 | Phase 1 specification documents | Implemented | 1 | `docs/` |
-| F-002 | Documentation consistency checker | Implemented | 1 | `tools/check_docs.py`, `make check-docs` |
+| F-002 | Documentation consistency checker (also checks the implementation's keywords and diagnostic codes against the docs) | Implemented | 1 | `tools/check_docs.py`, `make check-docs` |
+| F-100 | `ncc` driver: `--check`, `--dump-tokens`, `--dump-ast`, `--emit=typed`, `-Werror`, `--error-limit`; later-phase options rejected (E9002) | Implemented | 2 | `tests/driver/`, `DRIVER_CASES` in `tests/run_tests.py` |
+| F-101 | Diagnostics engine with codes, source excerpts, notes, help, error limit | Implemented | 2 | `tests/unit/test_diag.c`, every test in `tests/diag/` |
+| F-102 | Lexer for the complete token set, `--dump-tokens` | Implemented | 2 | `tests/lex/`, `tests/diag/lex_*.nc`, `tests/unit/test_lexer.c` |
+| F-103 | Parser and AST for the [P2] subset with error recovery, `--dump-ast`; the full expression and type grammar is parsed; later-phase declarations and statements are recognised and rejected (E9001) | Implemented | 2 | `tests/parse/`, `tests/diag/parse_*.nc` |
+| F-104 | Name resolution within one module (functions in any order, block scopes, shadowing, self-initialiser check) | Implemented | 2 | `tests/sema/scopes_calls.nc`, `tests/diag/sema_undeclared.nc`, `sema_redefinition.nc`, `sema_self_init.nc` |
+| F-105 | Type checking of primitive types: untyped constants, operators, implicit widening at coercion sites, checked conversions `T(x)`, constant folding with overflow detection, return-path analysis | Implemented | 2 | `tests/sema/`, `tests/diag/sema_*.nc`, `tests/unit/test_consteval.c` |
+| F-106 | Test runner: golden files, inline diagnostic expectations, driver cases, runner self-test | Implemented | 2 | `tests/run_tests.py`, `tests/selftest/` |
+| F-107 | libFuzzer harness for the front end | Implemented | 2 | `tests/fuzz/`, `make fuzz-run` |
 
-**The compiler does not exist yet.** No NovaC program can be compiled,
-checked or run.
+**There is no code generation yet.** NovaC programs in the Phase 2 subset
+can be checked (`ncc --check`) but not compiled or run.
+
+Known limitations of the Phase 2 front end (each is a later phase's
+feature, not a defect):
+
+- Single-file programs only; `import` is rejected (F-500).
+- Only primitive types; every other type and construct is rejected with
+  E9001 naming its phase.
+- Definite initialisation is not checked yet (F-402, Phase 5): `i32 x;
+  return x;` passes `--check`. No code is generated, so this cannot cause
+  undefined behaviour today.
 
 ## Planned
 
 | ID | Feature | Status | Phase | Reference |
 | --- | --- | --- | --- | --- |
-| F-100 | `ncc` driver, option parsing, `--version`/`--help` | Planned | 2 | NOVAC_COMPILER_ARCHITECTURE.md §11 |
-| F-101 | Diagnostics engine with codes, excerpts, fix-its | Planned | 2 | NOVAC_COMPILER_ARCHITECTURE.md §6 |
-| F-102 | Lexer (complete token set), `--dump-tokens` | Planned | 2 | NOVAC_GRAMMAR.md §2 |
-| F-103 | Parser and AST for the [P2] subset, `--dump-ast` | Planned | 2 | NOVAC_GRAMMAR.md |
-| F-104 | Name resolution (single module) | Planned | 2 | NOVAC_COMPILER_ARCHITECTURE.md §7.4 |
-| F-105 | Type checking of primitive types, literals, operators, conversions | Planned | 2 | NOVAC_TYPE_SYSTEM.md §2, §5 |
-| F-106 | Test runner, golden and inline-diagnostic tests | Planned | 2 | NOVAC_COMPILER_ARCHITECTURE.md §12 |
-| F-107 | Fuzzing harness for the front end | Planned | 2 | NOVAC_ROADMAP.md step 2.8 |
 | F-200 | NIR, lowering, verifier | Planned | 3 | NOVAC_COMPILER_ARCHITECTURE.md §9.1 |
 | F-201 | LLVM IR generation and object emission | Planned | 3 | NOVAC_COMPILER_ARCHITECTURE.md §9.4 |
 | F-202 | Checked integer arithmetic and conversions (panics) | Planned | 3 | NOVAC_TYPE_SYSTEM.md §2.2 |

@@ -1,0 +1,4 @@
+(module -
+  (fn f (ret i32) (params)
+    (block
+      (return (int 2)))))

@@ -1,0 +1,22 @@
+1:1 string ""
+1:4 string "hello"
+1:12 string "tab\tnewline\nquote\"backslash\\"
+1:47 string "nul\x00byte"
+1:59 string "A\x7F"
+2:1 string "unicode A\xC3\xA9\xE2\x82\xAC\xF0\x9F\x98\x80"
+2:41 string "raw UTF-8: \xC3\xA9\xE2\x82\xAC"
+3:1 cstring "C string"
+3:13 cstring ""
+3:17 ident cat
+3:20 string "x"
+4:1 char 97
+4:5 char 32
+4:9 char 10
+4:14 char 9
+4:19 char 0
+4:24 char 92
+4:29 char 39
+4:34 char 34
+4:38 char 65
+4:45 char 126
+5:1 eof

@@ -1,0 +1,15 @@
+(module app.core.math
+  (fn zero (ret i32) (params)
+    (block
+      (return (int 0))))
+  (fn legacy (ret i32) (params)
+    (block
+      (return (int 1))))
+  (fn add public (ret i64) (params (param i64 a) (param i64 b))
+    (block
+      (return (binary + (name a) (name b)))))
+  (fn nothing (ret void) (params)
+    (block))
+  (fn mix (ret f64) (params (param f32 a) (param f64 b) (param bool c) (param u8 d) (param usize e) (param isize f))
+    (block
+      (return (name b)))))

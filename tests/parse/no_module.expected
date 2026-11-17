@@ -1,0 +1,4 @@
+(module -
+  (fn main (ret i32) (params)
+    (block
+      (return (int 0)))))

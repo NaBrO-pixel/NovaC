@@ -1,0 +1,40 @@
+(module -
+  (fn classify (ret i32) (params (param i32 n))
+    (block
+      (if (binary < (name n :i32) (int 0 :i32 =0) :bool)
+        (block
+          (return (unary - (int 1 :{integer} =1) :i32 =-1)))
+        (if (binary == (name n :i32) (int 0 :i32 =0) :bool)
+          (block
+            (return (int 0 :i32 =0)))))
+      (return (int 1 :i32 =1))))
+  (fn factorial (ret u64) (params (param u64 n))
+    (block
+      (decl u64 (var acc (int 1 :u64 =1)))
+      (for (decl u64 (var i (int 2 :u64 =2))) (binary <= (name i :u64) (name n :u64) :bool) (step (unary post++ (name i :u64) :u64))
+        (block
+          (expr (assign *= (name acc :u64) (name i :u64) :void))))
+      (return (name acc :u64))))
+  (fn loops (ret i32) (params (param i32 limit))
+    (block
+      (decl i32 (var total (int 0 :i32 =0)))
+      (decl i32 (var i (int 0 :i32 =0)))
+      (while (binary < (name i :i32) (name limit :i32) :bool)
+        (block
+          (expr (unary post++ (name i :i32) :i32))
+          (if (binary == (binary % (name i :i32) (int 2 :i32 =2) :i32) (int 0 :i32 =0) :bool)
+            (continue))
+          (expr (assign += (name total :i32) (name i :i32) :void))))
+      (do (binary > (name total :i32) (int 100 :i32 =100) :bool)
+        (block
+          (expr (assign -= (name total :i32) (int 1 :i32 =1) :void))))
+      (for (init) - (step)
+        (block
+          (if (binary > (name total :i32) (int 0 :i32 =0) :bool)
+            (break))
+          (expr (unary post++ (name total :i32) :i32))))
+      (return (name total :i32))))
+  (fn forever (ret i32) (params)
+    (block
+      (while (bool true :bool =true)
+        (block)))))

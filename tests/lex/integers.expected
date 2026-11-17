@@ -1,0 +1,30 @@
+1:1 int 0
+1:3 int 1
+1:5 int 42
+1:8 int 1000000
+1:18 int 18446744073709551615
+2:1 int 0
+2:5 int 255
+2:10 int 3735928559
+2:22 int 171
+3:1 int 0
+3:5 int 493
+3:11 int 15
+4:1 int 0
+4:5 int 170
+4:17 int 1
+5:1 int 255 u8
+5:7 int 127 i8
+5:13 int 1 i16
+5:18 int 2 u16
+5:23 int 3 i32
+5:28 int 4 u32
+5:33 int 5 i64
+5:38 int 6 u64
+5:43 int 7 isize
+5:50 int 8 usize
+6:1 int 255 u8
+6:8 int 7986
+6:15 int 1 u8
+6:21 int 7 i64
+7:1 eof

@@ -1,0 +1,10 @@
+(module -
+  (fn f (ret void) (params)
+    (block
+      (decl i32 (var a (int 1)))
+      (decl i32 (var b (int 2)) (var c) (var d (int 3)))
+      (decl (const i32) (var e (int 4)))
+      (decl auto (var g (int 5)))
+      (decl const-auto (var h (float 6.5)))
+      (decl u64 (var later))
+      (decl bool (var flag (bool true))))))

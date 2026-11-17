@@ -1,0 +1,8 @@
+(module -
+  (fn f (ret void) (params)
+    (block
+      (decl i32 (var a (binary + (binary + (binary + (int 127) (int 15)) (int 5)) (int 1000))))
+      (decl u64 (var b (int 18446744073709551615 u64)))
+      (decl f32 (var c (float 1.5 f32)))
+      (decl f64 (var d (binary + (float 0.001) (float 3))))
+      (decl bool (var e (binary || (bool true) (bool false)))))))
