@@ -26,6 +26,12 @@ released versions yet.
   and under QEMU for AArch64 and RISC-V; `tests/nir/` golden NIR;
   `tests/codegen/` LLVM IR checks.
 
+### Verified
+
+- Fuzzing of commit `d3a3935` through NIR lowering and analysis:
+  8,029,243 inputs in 30 minutes, no crash, leak, timeout or sanitizer
+  report.
+
 ### Fixed during Phase 3
 
 - `-Ofast` used `nnan`/`ninf`, which made a NaN conversion check
