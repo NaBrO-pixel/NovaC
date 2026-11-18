@@ -13,7 +13,7 @@ Status vocabulary (checked by `tools/check_docs.py`):
 | Open | design not decided (see the question in NOVAC_DECISIONS.md) |
 | Unsupported | deliberately not part of NovaC, or out of scope for version 1 |
 
-Last updated: Phase 3.
+Last updated: Phase 4 (step 4a).
 
 ## Implemented
 
@@ -37,16 +37,21 @@ Last updated: Phase 3.
 | F-205 | Cross-compilation for AArch64 and RISC-V 64 (objects and executables) | Implemented | 3 | `tests/run/` under QEMU, `tests/codegen/target_*.nc` |
 | F-206 | DWARF 5 line tables (`-g`) | Implemented | 3 | `tests/codegen/debug_info.nc`, `-O2 -g` run configuration |
 | F-207 | Hosted default panic handler (weak, `dprintf` + `abort`), `-fpanic=minimal` | Implemented | 3 | `tests/run/panic_*.nc`, `tests/codegen/linkage_mangling.nc` |
-| F-208 | Definite initialisation of local variables (E5031; moved from F-402, D-041) | Implemented | 3 | `tests/diag/init_uninitialised.nc` |
+| F-208 | Definite initialisation of local variables (E5031; moved from F-402, D-041) | Implemented | 3 | `tests/diag/init_uninitialised.nc`, `tests/diag/init_partial.nc` |
+| F-300 | Structs (C layout, `@packed`, `@repr(C)`, opaque declarations), unions (initialise and write; reads need `unsafe`, F-302), enums with underlying types and checked conversions, arrays with bounds-checked indexing, `typedef`, `constexpr`, immutable `static const`, initialiser lists and struct literals with zero fill (D-043), `sizeof`/`alignof`/`offsetof`, character literals, `switch` with case lists, `fallthrough` and exhaustiveness (D-025) | Implemented | 4 | `tests/run/{structs,arrays,enums_switch,statics,layout,big_arrays,aggregate_arg_loop}.nc`, `tests/run/panic_{index,index_write,enum_convert,enum_range}.nc`, `tests/diag/sema_{struct,enum,array,init,switch,static,attrs,limits}.nc`, `tests/parse/aggregates.nc`, `tests/sema/aggregates.nc`, `tests/nir/places.nc`, `tests/codegen/aggregates.nc` |
 
-Programs in the Phase 2 language subset compile to native executables for
-x86-64, AArch64 and RISC-V 64 Linux.
+Programs in the Phase 2 language subset, plus the aggregate types, enums
+and `switch` of F-300, compile to native executables for x86-64, AArch64
+and RISC-V 64 Linux.
 
 Known limitations (each is a later phase's feature, not a defect):
 
 - Single-file programs only; `import` is rejected (F-500).
-- Only primitive types; every other type and construct is rejected with
-  E9001 naming its phase.
+- Mutable statics, union field reads, `uninit` and raw pointers need
+  `unsafe` (F-301, F-302) and are rejected with E9001 for now.
+- Generic structs, `static` locals, constexprs of aggregate type, and
+  every construct of a later phase are rejected with E9001 naming the
+  phase.
 - No C interoperability yet (Phase 4): programs cannot call C functions
   or print; they communicate only through their exit status and panics.
 
@@ -54,7 +59,6 @@ Known limitations (each is a later phase's feature, not a defect):
 
 | ID | Feature | Status | Phase | Reference |
 | --- | --- | --- | --- | --- |
-| F-300 | Structs, unions, enums, arrays, typedef, statics, `switch` | Planned | 4 | NOVAC_TYPE_SYSTEM.md §3 |
 | F-301 | Raw pointers | Planned | 4 | NOVAC_TYPE_SYSTEM.md §3.6 |
 | F-302 | Modes, `unsafe` blocks and functions, unsafe-operation checks | Planned | 4 | NOVAC_MEMORY_MODEL.md §2, §6 |
 | F-303 | `extern "C"` import/export, FFI-safety checks | Planned | 4 | NOVAC_ABI.md §11 |

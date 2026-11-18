@@ -713,6 +713,36 @@ cross C library. Nova Linker remains future work (NOVAC_ABI.md §8).
 Running cross tests also needs `qemu-user`. When they are missing, the
 test runner reports those configurations as skipped, never as passed.
 
+## D-043 — Omitted initialiser members are zero, when zero is a valid value
+
+**Status:** Accepted (Phase 4)
+
+**Context.** NOVAC_TYPE_SYSTEM.md §3.2 first required every field of an
+initialiser list to be given. Definite initialisation tracks variables
+whole (D-041), so a field cannot be assigned before its struct is
+initialised, and an array of 4096 elements would need 4096 values or
+`uninit` (unsafe). The alternatives:
+
+1. Require every member (Rust): safe, but large arrays need `unsafe` or a
+   repeat syntax NovaC does not have.
+2. Zero-fill omitted members, as C does: familiar, and `{}` is a cheap way
+   to initialise anything. But zero is not a valid value of every type: an
+   enum may have no enumerator 0, and Phase 5 references are never null.
+3. Add a repeat initialiser (`{0; 4096}`): new syntax for one case.
+
+**Decision.** Option 2, restricted to types for which the all-zero bit
+pattern is a valid value ("zeroable"): integers, floats, `bool`, raw
+pointers, unions, an enum with an enumerator whose value is 0, and arrays
+and structs whose members are all zeroable. Omitting a member that is not
+zeroable is E4081. `{}` zero-initialises a whole value of a zeroable type.
+A union initialiser sets at most one field; the rest of the union's bytes
+are zero.
+
+**Consequences.** `i32[4096] buf = {};` is safe and needs no new syntax;
+C code that relies on `= {0}` translates directly. Field-by-field
+initialisation after a bare declaration remains an error (E5031): write
+`= {}` first.
+
 ---
 
 ## Outstanding questions

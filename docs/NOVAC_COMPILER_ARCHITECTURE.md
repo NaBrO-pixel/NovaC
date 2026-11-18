@@ -272,16 +272,20 @@ NIR is not SSA; LLVM's `mem2reg`/SROA produce SSA. A verifier checks
 well-formedness after lowering, in every build (a failure is an internal
 compiler error). `--dump-nir` (`--emit=nir`) prints a stable text form.
 
-**Implemented in Phase 3** (`src/nir/`): places are whole locals of
-primitive type (projections arrive with aggregates in Phase 4).
-Statements are `assign(local, rvalue)` and `checked(op, a, b)`, which
-writes the wrapped result and an overflow flag. Rvalues are `use`,
-`binary`, `unary` and `cast`; operands are `copy` and `const`.
-Terminators are `goto`, `branch`, `call`, `return`, `unreachable` and
+**Implemented in Phases 3 and 4a** (`src/nir/`): a place is a local or a
+static followed by field and element projections (`_3.v[_5]`); an
+element index is a constant (checked by sema, E5040) or a `usize`
+temporary that a preceding `assert` bounds-checked. Statements are
+`assign(place, rvalue)` and `checked(op, a, b)`, which writes the wrapped
+result and an overflow flag. Rvalues are `use`, `binary`, `unary`, `cast`
+and `aggregate`; operands are `copy`, `const` and `zeroed`. Terminators
+are `goto`, `branch`, `switch`, `call`, `return`, `unreachable` and
 `assert(cond, expected, message)`. Every run-time check of
 NOVAC_TYPE_SYSTEM.md (overflow, division by zero, `MIN / -1`, shift
-amount, conversion range) is an explicit `assert`, so analyses and code
-generation see the same program. `move`, `switch_int`, `drop`,
+amount, conversion range, enum membership, array bounds) is an explicit
+`assert`, so analyses and code generation see the same program. Code
+generation computes each aggregate's LLVM type and stops with an internal
+error if LLVM's layout differs from the one sema computed. `move`, `drop`,
 `storage_live/dead` and the other planned forms arrive with the phases
 that need them.
 

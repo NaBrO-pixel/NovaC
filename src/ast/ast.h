@@ -142,6 +142,7 @@ typedef enum nc_expr_kind {
     NC_E_OFFSETOF,
     NC_E_GENERIC,  /* name::<args> */
     NC_E_IS,
+    NC_E_AGGREGATE, /* produced by sema from initialiser lists and struct literals */
     NC_E_ERROR,
 } nc_expr_kind;
 
@@ -179,7 +180,13 @@ typedef struct nc_cval {
     bool b;        /* BOOL */
 } nc_cval;
 
-typedef enum nc_binding_kind { NC_BIND_NONE, NC_BIND_VAR, NC_BIND_FN } nc_binding_kind;
+typedef enum nc_binding_kind {
+    NC_BIND_NONE,
+    NC_BIND_VAR,    /* struct nc_var* */
+    NC_BIND_FN,     /* struct nc_fn_info* */
+    NC_BIND_STATIC, /* struct nc_static_info* */
+    NC_BIND_FIELD,  /* MEMBER: binding holds the field index (uintptr_t) */
+} nc_binding_kind;
 
 struct nc_expr {
     nc_expr_kind kind;
@@ -252,6 +259,11 @@ struct nc_expr {
             nc_expr *operand;
             nc_pattern pattern;
         } is;
+        struct {
+            nc_expr **elems;     /* struct: one per field in order; array: one per element */
+            uint32_t nelems;
+            uint32_t union_field; /* union: the initialised field (nelems == 1) */
+        } agg;
     } u;
 };
 
@@ -260,8 +272,19 @@ struct nc_expr {
 typedef enum nc_stmt_kind {
     NC_S_BLOCK, NC_S_DECL, NC_S_IF, NC_S_WHILE, NC_S_DO, NC_S_FOR,
     NC_S_BREAK, NC_S_CONTINUE, NC_S_RETURN, NC_S_EXPR, NC_S_EMPTY,
-    NC_S_UNSUPPORTED, /* switch, defer, unsafe, asm, fallthrough: recognised, skipped */
+    NC_S_SWITCH,
+    NC_S_FALLTHROUGH,
+    NC_S_UNSUPPORTED, /* defer, unsafe, asm: recognised, skipped */
 } nc_stmt_kind;
+
+typedef struct nc_case {
+    nc_expr **values;  /* `case a, b:`; empty for `default:` */
+    uint32_t nvalues;
+    bool is_default;
+    nc_stmt **stmts;
+    uint32_t nstmts;
+    nc_span span;
+} nc_case;
 
 typedef struct nc_declarator {
     nc_sym name;
@@ -305,6 +328,11 @@ struct nc_stmt {
             uint32_t nstep;
             nc_stmt *body;
         } for_;
+        struct {
+            nc_expr *expr;
+            nc_case *cases;
+            uint32_t ncases;
+        } switch_;
         nc_expr *ret; /* RETURN: NULL for `return;` */
         nc_expr *expr;
         const char *unsupported; /* construct name */
@@ -334,7 +362,31 @@ typedef struct nc_param {
     struct nc_var *var; /* set by sema */
 } nc_param;
 
-typedef enum nc_decl_kind { NC_D_FUNCTION, NC_D_UNSUPPORTED } nc_decl_kind;
+typedef struct nc_field_decl {
+    nc_attr *attrs;
+    uint32_t nattrs;
+    bool is_public;
+    nc_type_expr *type;
+    nc_sym name;
+    nc_span span;
+} nc_field_decl;
+
+typedef struct nc_enumerator_decl {
+    nc_sym name;
+    nc_expr *value; /* NULL: previous value + 1 */
+    nc_span span;
+} nc_enumerator_decl;
+
+typedef enum nc_decl_kind {
+    NC_D_FUNCTION,
+    NC_D_STRUCT,
+    NC_D_UNION,
+    NC_D_ENUM,
+    NC_D_TYPEDEF,
+    NC_D_STATIC,
+    NC_D_CONSTEXPR,
+    NC_D_UNSUPPORTED,
+} nc_decl_kind;
 
 struct nc_decl {
     nc_decl_kind kind;
@@ -358,8 +410,31 @@ struct nc_decl {
             nc_stmt *body;      /* NULL for a declaration without body */
             struct nc_fn_info *info; /* set by sema; NULL for a rejected duplicate */
         } fn;
-        const char *unsupported; /* "struct", "import", ... */
+        struct {
+            nc_sym name;
+            nc_span name_span;
+            uint32_t ngeneric;
+            nc_span generic_span;
+            bool opaque;           /* `struct Name;` */
+            nc_field_decl *fields;
+            uint32_t nfields;
+        } agg; /* STRUCT, UNION */
+        struct {
+            nc_sym name;
+            nc_span name_span;
+            nc_type_expr *underlying; /* NULL: i32 */
+            nc_enumerator_decl *items;
+            uint32_t nitems;
+        } en;
+        struct {
+            nc_sym name;
+            nc_span name_span;
+            nc_type_expr *type;
+            nc_init *init;         /* STATIC: may be NULL; CONSTEXPR: an expression */
+        } var; /* TYPEDEF, STATIC, CONSTEXPR */
+        const char *unsupported; /* "import", ... */
     } u;
+    void *sema; /* the symbol semantic analysis created for this declaration */
 };
 
 typedef struct nc_module_ast {

@@ -5,10 +5,14 @@
  *   - `+ - *` on integers, unary `-`, `++`, `--`: checked arithmetic;
  *   - `/` and `%`: divisor non-zero, and not MIN / -1 for signed types;
  *   - `<<`, `>>`: shift amount below the bit width;
- *   - `T(x)`: the value is representable in T (NaN for floats).
+ *   - `T(x)`: the value is representable in T (NaN for floats), and an
+ *     integer converted to an enum is one of its enumerators;
+ *   - `a[i]`: the index is below the array length.
  * Expressions that semantic analysis folded to constants are emitted as
  * constants; their subexpressions have no side effects. */
 #include "nir/nir.h"
+
+#include "sema/consteval.h"
 
 #include "support/vec.h"
 
@@ -31,7 +35,8 @@ typedef struct lowerer {
     nc_nir_fn *fn;
     nc_block_id cur;
     NC_VEC(var_map) vars;
-    NC_VEC(loop_targets) loops;
+    NC_VEC(loop_targets) loops;  /* loops and switches; a switch's `cont` is the enclosing loop's */
+    nc_block_id fallthrough;     /* the next case's block, inside a switch */
 } lowerer;
 
 /* ---- construction helpers ---------------------------------------------------------- */
@@ -101,12 +106,35 @@ static void switch_to(lowerer *lx, nc_block_id b)
     lx->cur = b;
 }
 
-static nc_operand op_local(lowerer *lx, nc_local_id id, nc_span span)
+static nc_place place_local(lowerer *lx, nc_local_id id)
+{
+    nc_place p = {0};
+    p.base = NC_PLACE_LOCAL;
+    p.id = id;
+    p.type = lx->fn->locals[id].type;
+    return p;
+}
+
+static nc_operand op_place(nc_place p, nc_span span)
 {
     nc_operand o = {0};
     o.kind = NC_OP_COPY;
-    o.local = id;
-    o.type = lx->fn->locals[id].type;
+    o.place = p;
+    o.type = p.type;
+    o.span = span;
+    return o;
+}
+
+static nc_operand op_local(lowerer *lx, nc_local_id id, nc_span span)
+{
+    return op_place(place_local(lx, id), span);
+}
+
+static nc_operand op_zero(const nc_type *type, nc_span span)
+{
+    nc_operand o = {0};
+    o.kind = NC_OP_ZERO;
+    o.type = type;
     o.span = span;
     return o;
 }
@@ -138,7 +166,7 @@ static nc_operand op_bool(bool b, nc_span span)
     return op_const(c, nc_ty_prim(NC_PRIM_BOOL), span);
 }
 
-static void assign(lowerer *lx, nc_local_id dest, nc_rvalue rv, nc_span span)
+static void assign_place(lowerer *lx, nc_place dest, nc_rvalue rv, nc_span span)
 {
     nc_nir_stmt st = {0};
     st.kind = NC_ST_ASSIGN;
@@ -146,6 +174,19 @@ static void assign(lowerer *lx, nc_local_id dest, nc_rvalue rv, nc_span span)
     st.rv = rv;
     st.span = span;
     push_stmt(lx, st);
+}
+
+static void assign(lowerer *lx, nc_local_id dest, nc_rvalue rv, nc_span span)
+{
+    assign_place(lx, place_local(lx, dest), rv, span);
+}
+
+static void copy_to(lowerer *lx, nc_place dest, nc_operand v, nc_span span)
+{
+    nc_rvalue use = {0};
+    use.kind = NC_RV_USE;
+    use.a = v;
+    assign_place(lx, dest, use, span);
 }
 
 /* temp = rvalue; returns the temp as an operand. */
@@ -199,11 +240,12 @@ static void emit_assert(lowerer *lx, nc_operand cond, bool expected, const char 
     switch_to(lx, next);
 }
 
-/* (dest, flag) = checked op(a, b); assert !flag. Returns dest. */
+/* (dest, flag) = checked op(a, b); assert !flag. Returns dest; a new
+ * temporary when `dest` is NULL. */
 static nc_operand emit_checked(lowerer *lx, nc_nir_binop op, nc_operand a, nc_operand b, const nc_type *type,
-                               nc_local_id dest, const char *message, nc_span span)
+                               const nc_place *dest_in, const char *message, nc_span span)
 {
-    if (dest == UINT32_MAX) dest = new_local(lx, type, 0, span, false);
+    nc_place dest = dest_in ? *dest_in : place_local(lx, new_local(lx, type, 0, span, false));
     nc_local_id flag = new_local(lx, nc_ty_prim(NC_PRIM_BOOL), 0, span, false);
     nc_nir_stmt st = {0};
     st.kind = NC_ST_CHECKED;
@@ -215,7 +257,7 @@ static nc_operand emit_checked(lowerer *lx, nc_nir_binop op, nc_operand a, nc_op
     st.span = span;
     push_stmt(lx, st);
     emit_assert(lx, op_local(lx, flag, span), false, message, span);
-    return op_local(lx, dest, span);
+    return op_place(dest, span);
 }
 
 static const char *arena_message(lowerer *lx, const char *fmt, const char *arg)
@@ -244,9 +286,9 @@ static int64_t signed_min(const nc_type *t)
 
 /* Arithmetic, wrapping, bitwise, shift and comparison operators, shared by
  * binary expressions and compound assignment. `dest` receives the result
- * when not UINT32_MAX (compound assignment writes the variable directly). */
+ * when not NULL (compound assignment writes the place directly). */
 static nc_operand lower_binop(lowerer *lx, nc_binop op, nc_operand a, nc_operand b, const nc_type *result,
-                              nc_local_id dest, nc_span span)
+                              const nc_place *dest, nc_span span)
 {
     const nc_type *t = a.type; /* operand type */
     bool is_int = nc_ty_is_integer(t);
@@ -307,9 +349,9 @@ static nc_operand lower_binop(lowerer *lx, nc_binop op, nc_operand a, nc_operand
     rv.binop = nb;
     rv.a = a;
     rv.b = b;
-    if (dest != UINT32_MAX) {
-        assign(lx, dest, rv, span);
-        return op_local(lx, dest, span);
+    if (dest) {
+        assign_place(lx, *dest, rv, span);
+        return op_place(*dest, span);
     }
     return emit_rv(lx, result, rv, span);
 }
@@ -346,12 +388,56 @@ static nc_operand lower_logical(lowerer *lx, nc_expr *e)
     return op_local(lx, res, e->span);
 }
 
-/* T(x) for numeric T (NOVAC_TYPE_SYSTEM.md §5.2): checks, then converts. */
+static int cmp_cval(const void *a, const void *b)
+{
+    return nc_cv_cmp(*(const nc_cval *)a, *(const nc_cval *)b);
+}
+
+/* Assert that the integer `u` (of the enum's underlying type) is one of
+ * the enumerators of `et`. */
+static void check_enum_value(lowerer *lx, nc_operand u, const nc_type *et, nc_span span)
+{
+    const nc_type *b = nc_ty_prim(NC_PRIM_BOOL);
+    const nc_type *ut = et->en->underlying;
+    uint32_t n = et->en->nitems;
+    nc_cval *vals = nc_xcalloc(n ? n : 1, sizeof *vals);
+    for (uint32_t i = 0; i < n; i++) vals[i] = et->en->items[i].value;
+    qsort(vals, n, sizeof *vals, cmp_cval);
+    uint32_t k = 0; /* deduplicate */
+    for (uint32_t i = 0; i < n; i++)
+        if (k == 0 || nc_cv_cmp(vals[k - 1], vals[i]) != 0) vals[k++] = vals[i];
+    n = k;
+    const char *msg = arena_message(lx, "value is not an enumerator of '%s'", nc_type_name(et));
+    nc_cval last = vals[n - 1], span_len;
+    bool contiguous = nc_cv_sub(last, vals[0], &span_len) && !span_len.neg && span_len.mag == n - 1;
+    nc_operand ok;
+    if (contiguous) {
+        nc_operand lo = emit_binary(lx, NC_NB_GE, u, op_const(vals[0], ut, span), b, span);
+        nc_operand hi = emit_binary(lx, NC_NB_LE, u, op_const(last, ut, span), b, span);
+        ok = emit_binary(lx, NC_NB_AND, lo, hi, b, span);
+    } else {
+        ok = emit_binary(lx, NC_NB_EQ, u, op_const(vals[0], ut, span), b, span);
+        for (uint32_t i = 1; i < n; i++)
+            ok = emit_binary(lx, NC_NB_OR, ok, emit_binary(lx, NC_NB_EQ, u, op_const(vals[i], ut, span), b, span), b, span);
+    }
+    free(vals);
+    emit_assert(lx, ok, true, msg, span);
+}
+
+/* T(x) for numeric or enum T (NOVAC_TYPE_SYSTEM.md §5.2): checks, then
+ * converts. */
 static nc_operand lower_convert(lowerer *lx, nc_operand x, const nc_type *to, nc_span span)
 {
     const nc_type *from = x.type;
     const nc_type *b = nc_ty_prim(NC_PRIM_BOOL);
     if (from == to) return x;
+    if (nc_ty_is_enum(from)) /* an enum converts as its underlying integer */
+        return lower_convert(lx, emit_cast(lx, NC_CAST_NOP, x, from->en->underlying, span), to, span);
+    if (nc_ty_is_enum(to)) {
+        nc_operand u = lower_convert(lx, x, to->en->underlying, span);
+        check_enum_value(lx, u, to, span);
+        return emit_cast(lx, NC_CAST_NOP, u, to, span);
+    }
     const char *msg = arena_message(lx, "value out of range in conversion to '%s'", nc_type_name(to));
 
     if (nc_ty_is_bool(from)) return emit_cast(lx, NC_CAST_BOOL_TO_INT, x, to, span);
@@ -411,6 +497,111 @@ static nc_operand lower_convert(lowerer *lx, nc_operand x, const nc_type *to, nc
     return emit_cast(lx, NC_CAST_FLOAT_TO_INT, x, to, span);
 }
 
+/* ---- places ------------------------------------------------------------------------ */
+
+static uint32_t static_index(lowerer *lx, const nc_static_info *st)
+{
+    for (uint32_t i = 0; i < lx->m->nstatics; i++)
+        if (lx->m->statics[i].info == st) return i;
+    nc_ice("nir lowering", "static without NIR");
+}
+
+static nc_place project(lowerer *lx, nc_place base, nc_proj pr)
+{
+    nc_proj *projs = nc_arena_alloc(&lx->s->arena, (base.nprojs + 1) * sizeof *projs);
+    if (base.nprojs) memcpy(projs, base.projs, base.nprojs * sizeof *projs);
+    projs[base.nprojs] = pr;
+    base.projs = projs;
+    base.nprojs++;
+    base.type = pr.type;
+    return base;
+}
+
+static nc_place lower_place(lowerer *lx, nc_expr *e);
+
+/* A place for `e`: `e` itself if it denotes one, else a temporary holding
+ * its value (`f().x`). */
+static nc_place place_of(lowerer *lx, nc_expr *e)
+{
+    bool is_place = (e->kind == NC_E_NAME && (e->binding_kind == NC_BIND_VAR || e->binding_kind == NC_BIND_STATIC)) ||
+                    (e->kind == NC_E_MEMBER && e->binding_kind == NC_BIND_FIELD) || e->kind == NC_E_INDEX;
+    if (is_place && e->cval.kind == NC_CV_NONE) return lower_place(lx, e);
+    nc_operand v = lower_expr(lx, e);
+    if (v.kind == NC_OP_COPY && v.place.base == NC_PLACE_LOCAL && !lx->fn->locals[v.place.id].is_user) return v.place;
+    nc_local_id t = new_local(lx, e->type, 0, e->span, false);
+    copy_to(lx, place_local(lx, t), v, e->span);
+    return place_local(lx, t);
+}
+
+static nc_place lower_place(lowerer *lx, nc_expr *e)
+{
+    switch (e->kind) {
+    case NC_E_NAME:
+        if (e->binding_kind == NC_BIND_VAR) return place_local(lx, local_of(lx, e->binding));
+        if (e->binding_kind == NC_BIND_STATIC) {
+            nc_place p = {0};
+            p.base = NC_PLACE_STATIC;
+            p.id = static_index(lx, e->binding);
+            p.type = e->type;
+            return p;
+        }
+        break;
+    case NC_E_MEMBER: {
+        nc_place base = place_of(lx, e->u.member.base);
+        nc_proj pr = {0};
+        pr.kind = NC_PROJ_FIELD;
+        pr.field = (uint32_t)(uintptr_t)e->binding;
+        pr.type = e->type;
+        return project(lx, base, pr);
+    }
+    case NC_E_INDEX: {
+        nc_place base = place_of(lx, e->u.index.base);
+        nc_operand ix = lower_expr(lx, e->u.index.index);
+        nc_proj pr = {0};
+        pr.kind = NC_PROJ_INDEX;
+        pr.type = e->type;
+        if (ix.kind == NC_OP_CONST) {
+            pr.index_is_const = true; /* below the length: checked by sema (E5040) */
+            pr.index = ix.cval.mag;
+        } else {
+            /* Copy the index, so the checked value is the one used even if
+             * the variable changes before the place is accessed. */
+            const nc_type *usize = nc_ty_prim(NC_PRIM_USIZE);
+            nc_local_id t = new_local(lx, usize, 0, e->span, false);
+            copy_to(lx, place_local(lx, t), ix, e->span);
+            uint64_t len = nc_ty_is_array(base.type) ? base.type->len : 0;
+            nc_operand ok = emit_binary(lx, NC_NB_LT, op_local(lx, t, e->span), op_int((int64_t)len, usize, e->span),
+                                        nc_ty_prim(NC_PRIM_BOOL), e->span);
+            emit_assert(lx, ok, true, "index out of bounds", e->u.index.index->span);
+            pr.index_local = t;
+        }
+        return project(lx, base, pr);
+    }
+    default: break;
+    }
+    nc_ice("nir lowering", "expression is not a place");
+}
+
+static nc_operand lower_aggregate(lowerer *lx, nc_expr *e)
+{
+    if (e->u.agg.nelems == 0) return op_zero(e->type, e->span); /* `{}` */
+    nc_rvalue rv = {0};
+    rv.kind = NC_RV_AGGREGATE;
+    rv.nelems = e->u.agg.nelems;
+    rv.union_field = e->u.agg.union_field;
+    rv.elems = nc_arena_alloc(&lx->s->arena, rv.nelems * sizeof *rv.elems);
+    for (uint32_t i = 0; i < rv.nelems; i++) {
+        nc_expr *x = e->u.agg.elems[i];
+        if (x) {
+            rv.elems[i] = lower_expr(lx, x);
+            continue;
+        }
+        const nc_type *mt = nc_ty_is_array(e->type) ? e->type->elem : e->type->agg->fields[i].type;
+        rv.elems[i] = op_zero(mt, e->span);
+    }
+    return emit_rv(lx, e->type, rv, e->span);
+}
+
 static nc_operand lower_unary(lowerer *lx, nc_expr *e)
 {
     nc_unop op = e->u.unary.op;
@@ -420,15 +611,15 @@ static nc_operand lower_unary(lowerer *lx, nc_expr *e)
     case NC_UN_NEG: {
         nc_operand x = lower_expr(lx, e->u.unary.operand);
         if (nc_ty_is_float(t)) return emit_unary(lx, NC_NU_NEG_FLOAT, x, t, e->span);
-        return emit_checked(lx, NC_NB_SUB, op_int(0, t, e->span), x, t, UINT32_MAX, "integer overflow in negation", e->span);
+        return emit_checked(lx, NC_NB_SUB, op_int(0, t, e->span), x, t, NULL, "integer overflow in negation", e->span);
     }
     case NC_UN_NOT: return emit_unary(lx, NC_NU_NOT, lower_expr(lx, e->u.unary.operand), t, e->span);
     case NC_UN_BITNOT: return emit_unary(lx, NC_NU_BITNOT, lower_expr(lx, e->u.unary.operand), t, e->span);
     case NC_UN_PREINC: case NC_UN_PREDEC: case NC_UN_POSTINC: case NC_UN_POSTDEC: {
-        nc_local_id v = local_of(lx, e->u.unary.operand->binding);
+        nc_place v = lower_place(lx, e->u.unary.operand);
         bool inc = op == NC_UN_PREINC || op == NC_UN_POSTINC;
         bool post = op == NC_UN_POSTINC || op == NC_UN_POSTDEC;
-        nc_operand cur = op_local(lx, v, e->span);
+        nc_operand cur = op_place(v, e->span);
         nc_operand old = cur;
         if (post) {
             nc_rvalue use = {0};
@@ -437,7 +628,7 @@ static nc_operand lower_unary(lowerer *lx, nc_expr *e)
             old = emit_rv(lx, t, use, e->span);
         }
         if (nc_ty_is_integer(t)) {
-            emit_checked(lx, inc ? NC_NB_ADD : NC_NB_SUB, cur, op_int(1, t, e->span), t, v,
+            emit_checked(lx, inc ? NC_NB_ADD : NC_NB_SUB, cur, op_int(1, t, e->span), t, &v,
                          inc ? "integer overflow in '++'" : "integer overflow in '--'", e->span);
         } else {
             nc_cval one = {0};
@@ -448,9 +639,9 @@ static nc_operand lower_unary(lowerer *lx, nc_expr *e)
             rv.binop = inc ? NC_NB_ADD : NC_NB_SUB;
             rv.a = cur;
             rv.b = op_const(one, t, e->span);
-            assign(lx, v, rv, e->span);
+            assign_place(lx, v, rv, e->span);
         }
-        return post ? old : op_local(lx, v, e->span);
+        return post ? old : op_place(v, e->span);
     }
     default: nc_ice("nir lowering", "unary operator not supported in this phase");
     }
@@ -509,18 +700,14 @@ static nc_operand lower_call(lowerer *lx, nc_expr *e)
     return op_local(lx, t.dest, e->span);
 }
 
+/* The right operand is evaluated first, then the place (as in Rust); a
+ * compound assignment evaluates the place once. */
 static nc_operand lower_assign(lowerer *lx, nc_expr *e)
 {
-    nc_local_id v = local_of(lx, e->u.binary.lhs->binding);
     nc_operand r = lower_expr(lx, e->u.binary.rhs);
-    if (e->u.binary.op == NC_BIN_NONE) {
-        nc_rvalue use = {0};
-        use.kind = NC_RV_USE;
-        use.a = r;
-        assign(lx, v, use, e->span);
-    } else {
-        lower_binop(lx, e->u.binary.op, op_local(lx, v, e->span), r, lx->fn->locals[v].type, v, e->span);
-    }
+    nc_place v = lower_place(lx, e->u.binary.lhs);
+    if (e->u.binary.op == NC_BIN_NONE) copy_to(lx, v, r, e->span);
+    else lower_binop(lx, e->u.binary.op, op_place(v, e->span), r, v.type, &v, e->span);
     return op_bool(false, e->span); /* assignments have type void */
 }
 
@@ -531,14 +718,17 @@ static nc_operand lower_expr(lowerer *lx, nc_expr *e)
         return op_const(e->cval, e->type, e->span);
     }
     switch (e->kind) {
-    case NC_E_NAME: return op_local(lx, local_of(lx, e->binding), e->span);
+    case NC_E_NAME:
+    case NC_E_MEMBER:
+    case NC_E_INDEX: return op_place(lower_place(lx, e), e->span);
+    case NC_E_AGGREGATE: return lower_aggregate(lx, e);
     case NC_E_UNARY: return lower_unary(lx, e);
     case NC_E_BINARY:
         if (e->u.binary.op == NC_BIN_AND || e->u.binary.op == NC_BIN_OR) return lower_logical(lx, e);
         {
             nc_operand a = lower_expr(lx, e->u.binary.lhs);
             nc_operand b = lower_expr(lx, e->u.binary.rhs);
-            return lower_binop(lx, e->u.binary.op, a, b, e->type, UINT32_MAX, e->span);
+            return lower_binop(lx, e->u.binary.op, a, b, e->type, NULL, e->span);
         }
     case NC_E_ASSIGN: return lower_assign(lx, e);
     case NC_E_COND: return lower_cond_expr(lx, e);
@@ -599,6 +789,80 @@ static void lower_loop_body(lowerer *lx, nc_stmt *body, nc_block_id brk, nc_bloc
     lower_stmt(lx, body);
     lx->vars.len = mark;
     lx->loops.len--;
+}
+
+/* switch (D-025): one block per case; an empty case and `fallthrough`
+ * continue into the next case's block. */
+static void lower_switch(lowerer *lx, nc_stmt *s)
+{
+    nc_operand v = lower_expr(lx, s->u.switch_.expr);
+    uint32_t ncases = s->u.switch_.ncases;
+    nc_case *cs = s->u.switch_.cases;
+    nc_block_id exit = new_block(lx);
+    nc_block_id *bodies = nc_xcalloc(ncases ? ncases : 1, sizeof *bodies);
+    uint32_t nvalues = 0;
+    nc_block_id otherwise = exit;
+    for (uint32_t i = 0; i < ncases; i++) {
+        bodies[i] = new_block(lx);
+        nvalues += cs[i].nvalues;
+        if (cs[i].is_default) otherwise = bodies[i];
+    }
+    nc_terminator t = {0};
+    t.kind = NC_TERM_SWITCH;
+    t.span = s->span;
+    t.cond = v;
+    t.ncases = nvalues;
+    t.case_values = nc_arena_alloc(&lx->s->arena, (nvalues ? nvalues : 1) * sizeof *t.case_values);
+    t.case_targets = nc_arena_alloc(&lx->s->arena, (nvalues ? nvalues : 1) * sizeof *t.case_targets);
+    uint32_t k = 0;
+    for (uint32_t i = 0; i < ncases; i++)
+        for (uint32_t j = 0; j < cs[i].nvalues; j++) {
+            t.case_values[k] = cs[i].values[j]->cval;
+            t.case_targets[k++] = bodies[i];
+        }
+    const nc_type *vt = s->u.switch_.expr->type;
+    bool has_default = otherwise != exit;
+    if (!has_default && (nc_ty_is_enum(vt) || nc_ty_is_bool(vt)) && nvalues) {
+        /* Exhaustive (checked by sema, E4071). A bool cannot hold another
+         * value; an enum can only through unsafe code, which panics here. */
+        bool all_bool = nc_ty_is_bool(vt);
+        bool covered = true;
+        if (all_bool) {
+            bool seen[2] = {false, false};
+            for (uint32_t q = 0; q < nvalues; q++) seen[t.case_values[q].b] = true;
+            covered = seen[0] && seen[1];
+        }
+        if (covered) {
+            otherwise = new_block(lx);
+            nc_block_id save = lx->cur;
+            switch_to(lx, otherwise);
+            if (!all_bool) emit_assert(lx, op_bool(false, s->span), true, "invalid enum value in switch", s->span);
+            nc_terminator u = {0};
+            u.kind = NC_TERM_UNREACHABLE;
+            u.span = s->span;
+            terminate(lx, u);
+            switch_to(lx, save);
+        }
+    }
+    t.other = otherwise;
+    terminate(lx, t);
+
+    loop_targets lt = {exit, lx->loops.len ? lx->loops.data[lx->loops.len - 1].cont : NC_NO_BLOCK};
+    nc_vec_push(&lx->loops, lt);
+    nc_block_id saved_ft = lx->fallthrough;
+    for (uint32_t i = 0; i < ncases; i++) {
+        nc_block_id next = i + 1 < ncases ? bodies[i + 1] : exit;
+        lx->fallthrough = next;
+        switch_to(lx, bodies[i]);
+        size_t mark = lx->vars.len;
+        for (uint32_t j = 0; j < cs[i].nstmts; j++) lower_stmt(lx, cs[i].stmts[j]);
+        lx->vars.len = mark;
+        goto_block(lx, next, cs[i].span); /* an empty case, or the end of the last one */
+    }
+    lx->fallthrough = saved_ft;
+    lx->loops.len--;
+    free(bodies);
+    switch_to(lx, exit);
 }
 
 static void lower_stmt(lowerer *lx, nc_stmt *s)
@@ -689,6 +953,8 @@ static void lower_stmt(lowerer *lx, nc_stmt *s)
         terminate(lx, t);
         break;
     }
+    case NC_S_SWITCH: lower_switch(lx, s); break;
+    case NC_S_FALLTHROUGH: goto_block(lx, lx->fallthrough, s->span); break;
     case NC_S_UNSUPPORTED: nc_ice("nir lowering", "unsupported statement reached lowering");
     }
 }
@@ -758,6 +1024,23 @@ nc_nir_module *nc_nir_lower(nc_session *s, nc_module_ast *m)
     for (uint32_t i = 0; i < m->ndecls; i++)
         if (m->decls[i]->kind == NC_D_FUNCTION && m->decls[i]->u.fn.info) nfn++;
     nm->fns = nc_xcalloc(nfn ? nfn : 1, sizeof *nm->fns);
+    uint32_t nst = 0;
+    for (uint32_t i = 0; i < m->ndecls; i++)
+        if (m->decls[i]->kind == NC_D_STATIC && m->decls[i]->sema) nst++;
+    nm->statics = nc_xcalloc(nst ? nst : 1, sizeof *nm->statics);
+    for (uint32_t i = 0; i < m->ndecls; i++) {
+        nc_decl *d = m->decls[i];
+        if (d->kind != NC_D_STATIC || !d->sema) continue;
+        nc_static_info *st = d->sema;
+        nc_nir_static *ns = &nm->statics[nm->nstatics++];
+        ns->info = st;
+        ns->name = st->name;
+        ns->span = st->span;
+        ns->type = st->type;
+        ns->is_const = st->is_const;
+        ns->is_public = st->is_public;
+        ns->init = st->init;
+    }
     for (uint32_t i = 0; i < m->ndecls; i++) {
         nc_decl *d = m->decls[i];
         if (d->kind != NC_D_FUNCTION || !d->u.fn.info) continue;

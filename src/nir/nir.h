@@ -11,8 +11,9 @@
  * same program.
  *
  * NIR is not SSA: a local may be assigned many times. LLVM's mem2reg
- * produces SSA. In Phase 3 places are whole locals (no projections), and
- * every local has a primitive type. */
+ * produces SSA. A place is a local or a static followed by field and
+ * element projections (`_3.x[_5]`); an element projection's index is a
+ * constant or a `usize` local that a preceding assert bounds-checked. */
 #ifndef NC_NIR_NIR_H
 #define NC_NIR_NIR_H
 
@@ -31,11 +32,35 @@ typedef struct nc_nir_local {
     bool is_user;     /* a declared variable or parameter (checked for initialisation) */
 } nc_nir_local;
 
-typedef enum nc_operand_kind { NC_OP_COPY, NC_OP_CONST } nc_operand_kind;
+typedef enum nc_place_base { NC_PLACE_LOCAL, NC_PLACE_STATIC } nc_place_base;
+typedef enum nc_proj_kind { NC_PROJ_FIELD, NC_PROJ_INDEX } nc_proj_kind;
+
+typedef struct nc_proj {
+    nc_proj_kind kind;
+    uint32_t field;           /* FIELD: index into the struct's or union's fields */
+    bool index_is_const;      /* INDEX */
+    uint64_t index;           /* INDEX, constant: below the array length (checked by sema) */
+    nc_local_id index_local;  /* INDEX, otherwise: a usize local, already bounds-checked */
+    const nc_type *type;      /* the type after this projection */
+} nc_proj;
+
+typedef struct nc_place {
+    nc_place_base base;
+    uint32_t id;              /* local id, or index into the module's statics */
+    const nc_proj *projs;     /* session arena */
+    uint32_t nprojs;
+    const nc_type *type;      /* the type of the whole place */
+} nc_place;
+
+typedef enum nc_operand_kind {
+    NC_OP_COPY,  /* the value stored in a place */
+    NC_OP_CONST, /* a scalar constant */
+    NC_OP_ZERO,  /* the all-zero value of `type` (omitted initialiser members, D-043) */
+} nc_operand_kind;
 
 typedef struct nc_operand {
     nc_operand_kind kind;
-    nc_local_id local;   /* COPY */
+    nc_place place;      /* COPY */
     nc_cval cval;        /* CONST */
     const nc_type *type;
     nc_span span;        /* source of the value, for diagnostics */
@@ -59,9 +84,10 @@ typedef enum nc_cast_kind {
     NC_CAST_FLOAT_TO_INT, /* truncates toward zero; range checked beforehand */
     NC_CAST_FLOAT_RESIZE,
     NC_CAST_BOOL_TO_INT,
+    NC_CAST_NOP,          /* enum <-> its underlying integer type: same representation */
 } nc_cast_kind;
 
-typedef enum nc_rvalue_kind { NC_RV_USE, NC_RV_BINARY, NC_RV_UNARY, NC_RV_CAST } nc_rvalue_kind;
+typedef enum nc_rvalue_kind { NC_RV_USE, NC_RV_BINARY, NC_RV_UNARY, NC_RV_CAST, NC_RV_AGGREGATE } nc_rvalue_kind;
 
 typedef struct nc_rvalue {
     nc_rvalue_kind kind;
@@ -69,6 +95,11 @@ typedef struct nc_rvalue {
     nc_nir_unop unop;
     nc_cast_kind cast;
     nc_operand a, b;
+    /* AGGREGATE: a struct (one operand per field), an array (one per
+     * element) or a union (one operand, for field `union_field`). */
+    nc_operand *elems;    /* session arena */
+    uint32_t nelems;
+    uint32_t union_field;
 } nc_rvalue;
 
 typedef enum nc_stmt_kind_nir {
@@ -78,7 +109,7 @@ typedef enum nc_stmt_kind_nir {
 
 typedef struct nc_nir_stmt {
     nc_stmt_kind_nir kind;
-    nc_local_id dest;
+    nc_place dest;
     nc_local_id flag;     /* CHECKED */
     nc_nir_binop op;      /* CHECKED: ADD, SUB or MUL */
     nc_rvalue rv;         /* ASSIGN; CHECKED uses rv.a and rv.b */
@@ -92,17 +123,21 @@ typedef enum nc_term_kind {
     NC_TERM_RETURN,      /* has_value: return value */
     NC_TERM_CALL,        /* dest = fn(args); goto target */
     NC_TERM_ASSERT,      /* if cond == expected goto target else panic(message) */
+    NC_TERM_SWITCH,      /* goto the target of the case equal to cond, else other */
     NC_TERM_UNREACHABLE, /* control cannot reach here (proved by sema) */
 } nc_term_kind;
 
 typedef struct nc_terminator {
     nc_term_kind kind;
     nc_span span;
-    nc_operand cond;     /* BRANCH, ASSERT */
+    nc_operand cond;     /* BRANCH, ASSERT, SWITCH */
     nc_operand value;    /* RETURN */
     bool has_value;
     nc_block_id target;  /* GOTO, BRANCH (true), CALL, ASSERT */
-    nc_block_id other;   /* BRANCH (false) */
+    nc_block_id other;   /* BRANCH (false), SWITCH (no case matches) */
+    nc_cval *case_values;      /* SWITCH (session arena) */
+    nc_block_id *case_targets; /* SWITCH (session arena) */
+    uint32_t ncases;
     struct nc_nir_fn *callee;
     nc_operand *args;
     uint32_t nargs;
@@ -130,12 +165,28 @@ typedef struct nc_nir_fn {
     uint32_t nblocks, cap_blocks;
 } nc_nir_fn;
 
+/* A module-level static: storage with a constant initialiser. */
+typedef struct nc_nir_static {
+    nc_static_info *info;
+    nc_sym name;
+    nc_span span;
+    const nc_type *type;
+    bool is_const;
+    bool is_public;
+    const nc_expr *init;    /* a constant expression (nc_is_constant_expr) */
+} nc_nir_static;
+
 typedef struct nc_nir_module {
     nc_path name;           /* module path; from the file stem when undeclared */
     uint32_t file;
     nc_nir_fn **fns;
     uint32_t nfns;
+    nc_nir_static *statics;
+    uint32_t nstatics;
 } nc_nir_module;
+
+/* The type of a place's base (a local's or a static's type). */
+const nc_type *nc_nir_place_base_type(const nc_nir_module *m, const nc_nir_fn *f, const nc_place *p);
 
 /* Lower a type-checked module (NOVAC_COMPILER_ARCHITECTURE.md §9.1).
  * Memory comes from the session arena and the C heap; release with
