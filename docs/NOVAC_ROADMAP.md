@@ -10,7 +10,7 @@ repository. Feature-level status is in [FEATURE_STATUS.md](FEATURE_STATUS.md).
 | 0 | Repository and architecture investigation | ✅ Complete |
 | 1 | Formal specification | ✅ Complete (this commit series) |
 | 2 | Compiler foundation | ✅ Complete |
-| 3 | Native compilation | ⏳ Implemented; final fuzzing run pending |
+| 3 | Native compilation | ✅ Complete |
 | 4 | C interoperability (plus aggregates, raw pointers, unsafe) | Next |
 | 5 | Memory safety | Planned |
 | 6 | Advanced language features | Planned |
@@ -144,6 +144,10 @@ strings, ownership. These are not stubbed: they are rejected (E9001).
   rather than `write`, so it can format the location (D-039). Definite
   initialisation was brought forward from Phase 5 (D-041). `-Ofast`
   excludes `nnan`/`ninf` (D-040).
+- **Fuzzing:** a 30-minute libFuzzer run (ASan + UBSan) of the code
+  committed as `d3a3935` went through lexing, parsing, type checking, NIR
+  lowering, the NIR verifier and the initialisation analysis. It executed
+  8,029,243 inputs with no crash, leak, timeout or sanitizer report.
 - **Still open:** Q-01 (licensing of compiled programs), which was to be
   answered before linked programs exist. Programs are now linked; the
   question is reported to the owner.
