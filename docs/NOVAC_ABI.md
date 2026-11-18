@@ -25,13 +25,13 @@ compatibility unless stated otherwise.
 
 | Target name (`--target`) | LLVM triple used | Environment | Status |
 | --- | --- | --- | --- |
-| `x86_64-linux-gnu` | `x86_64-unknown-linux-gnu` | hosted, Linux, glibc | Planned (Phase 3), development host |
+| `x86_64-linux-gnu` | `x86_64-unknown-linux-gnu` | hosted, Linux, glibc | Implemented (Phase 3), default on x86-64 hosts |
 | `x86_64-novaris` | `x86_64-unknown-linux-gnu` (see §10.1) | hosted, NovarisOS, LibNovaC | Planned (Phase 3/4) |
 | `x86_64-unknown-none` | `x86_64-unknown-none-elf` | freestanding | Planned (Phase 7) |
 | `x86_64-novaris-kernel` | `x86_64-unknown-none-elf` + kernel options (§10.2) | freestanding kernel | Planned (Phase 7) |
-| `aarch64-linux-gnu` | `aarch64-unknown-linux-gnu` | hosted, Linux | Planned (Phase 3, cross) |
+| `aarch64-linux-gnu` | `aarch64-unknown-linux-gnu` | hosted, Linux | Implemented (Phase 3), cross; tested under QEMU |
 | `aarch64-unknown-none` | `aarch64-unknown-none-elf` | freestanding | Planned (Phase 7) |
-| `riscv64-linux-gnu` | `riscv64-unknown-linux-gnu` | hosted, Linux | Planned (Phase 3, cross) |
+| `riscv64-linux-gnu` | `riscv64-unknown-linux-gnu` | hosted, Linux | Implemented (Phase 3), cross; tested under QEMU |
 | `riscv64-unknown-none` | `riscv64-unknown-none-elf` | freestanding | Planned (Phase 7) |
 
 Baselines (D-023): x86-64-v1 (SSE2), ARMv8.0-A, RV64GC with the `lp64d`
@@ -99,6 +99,11 @@ signatures (E7031).
 
 Bitfields and flexible array members are not supported in version 1.
 
+In Phase 3 no value crosses a C ABI boundary except the generated `main`
+wrapper, and `bool` is LLVM `i1` in registers and locals. Phase 4 must
+give `bool` its one-byte memory form at FFI boundaries and in aggregates
+(as Clang does for `_Bool`) before `extern "C"` is enabled.
+
 ## 5. C calling-convention lowering
 
 LLVM does not implement the C ABI for aggregates: the frontend must
@@ -161,7 +166,8 @@ on that target is rejected (E7032), not guessed.
   `int main(int argc, char** argv, char** envp)`, which LibNovaC's `_start`
   calls (confirmed in LibNovaC `src/arch/x86_64/start.c`); glibc's start
   files call the same symbol.
-- All other NovaC symbols are mangled (Provisional):
+- All other NovaC symbols are mangled (implemented for functions in
+  Phase 3; generic type codes remain Provisional):
 
   ```text
   mangled   = "_NC" module-path "M" item-path [ "I" { type-code } "E" ]
@@ -229,7 +235,19 @@ _Noreturn void __nova_panic(const struct __nova_panic_info *info);
 Message and location strings are static data: the panic path never
 allocates, which makes it usable in kernels and interrupt handlers
 ("kernel-safe diagnostics"). `-fpanic=minimal` omits the message and file
-strings to save space.
+strings (null pointers, length 0) to save space; line and column remain.
+
+The hosted default handler (D-039) is a weak definition in every hosted
+object. It writes the following to standard error and calls `abort()`:
+
+```text
+<file>:<line>:<column>: panic: <message>
+```
+
+The messages produced in Phase 3 are `integer overflow in '+'` (also
+`'-'`, `'*'`, `'/'`, `'%'`, `'++'`, `'--'`), `integer overflow in
+negation`, `division by zero`, `shift amount too large`, and `value out of
+range in conversion to '<type>'`.
 
 ### 9.2 Entry points
 

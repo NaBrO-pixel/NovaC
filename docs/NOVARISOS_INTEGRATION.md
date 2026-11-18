@@ -167,8 +167,8 @@ question.
 | R-05 | Overflow and bounds checks cost performance relative to C | Medium / Medium | NIR and LLVM check elimination; measured in Phase 8; no claims until measured |
 | R-06 | Implicit Copy (D-014) surprises users when a type gains a destructor | Low / Low | Produces compile errors, never silent change; provisional decision revisited before Phase 5 |
 | R-07 | No preprocessor raises the cost of adopting C libraries | Medium / Medium | `extern "C"` declarations; planned header binding generator (F-803) |
-| R-08 | Cross-target execution testing needs QEMU user-mode, not installed in the reference environment | High / Medium | Phase 3 prerequisite; until then cross output is checked by disassembly and stated as such |
-| R-09 | LLVM development headers are not installed in the reference environment | Certain / Low | Phase 2 does not need LLVM; install `llvm-18-dev` before Phase 3 |
+| R-08 | Cross-target execution testing needs QEMU user-mode | Resolved in Phase 3 | `qemu-user` and the cross GCC toolchains installed; every execution test runs on AArch64 and RISC-V under QEMU; missing tools are reported as skipped |
+| R-09 | LLVM development headers needed | Resolved in Phase 3 | `llvm-18-dev` installed; the Makefile locates it with `llvm-config` and stops with a clear message otherwise |
 | R-10 | LibNovaC has no threads; libNova-Sys does not exist | Certain / Medium | `std` binds to the C library behind `std.sys`; threads on NovarisOS wait (IR-11) |
 | R-11 | Kernel linker-script incompatibilities (orphan sections, unwind sections) | Medium / Medium | No per-function sections, no unwind tables by default; Phase 7 demonstration links into the real kernel |
 | R-12 | Name confusion between NovaC and LibNovaC in builds and documentation | High / Low | D-020; Q-04 recommends renaming LibNovaC's build variables |
@@ -180,4 +180,6 @@ Recorded so later phases know what was verified where:
 
 - Linux x86-64; GCC 13.3; Clang/LLVM 18.1.3 (targets include X86,
   AArch64, RISCV); `ld.lld` available; CMake 3.28; Python 3.
-- `llvm-c` headers **not** installed; QEMU **not** installed.
+- `llvm-c` headers **not** installed; QEMU **not** installed (Phase 0/1).
+  Phase 3 installed `llvm-18-dev`, `qemu-user`, `gcc-aarch64-linux-gnu`,
+  `gcc-riscv64-linux-gnu` and `libclang-rt-18-dev` (for fuzzing).

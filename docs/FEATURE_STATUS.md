@@ -13,7 +13,7 @@ Status vocabulary (checked by `tools/check_docs.py`):
 | Open | design not decided (see the question in NOVAC_DECISIONS.md) |
 | Unsupported | deliberately not part of NovaC, or out of scope for version 1 |
 
-Last updated: Phase 2.
+Last updated: Phase 3.
 
 ## Implemented
 
@@ -28,32 +28,32 @@ Last updated: Phase 2.
 | F-104 | Name resolution within one module (functions in any order, block scopes, shadowing, self-initialiser check) | Implemented | 2 | `tests/sema/scopes_calls.nc`, `tests/diag/sema_undeclared.nc`, `sema_redefinition.nc`, `sema_self_init.nc` |
 | F-105 | Type checking of primitive types: untyped constants, operators, implicit widening at coercion sites, checked conversions `T(x)`, constant folding with overflow detection, return-path analysis | Implemented | 2 | `tests/sema/`, `tests/diag/sema_*.nc`, `tests/unit/test_consteval.c` |
 | F-106 | Test runner: golden files, inline diagnostic expectations, driver cases, runner self-test | Implemented | 2 | `tests/run_tests.py`, `tests/selftest/` |
-| F-107 | libFuzzer harness for the front end | Implemented | 2 | `tests/fuzz/`, `make fuzz-run` |
+| F-107 | libFuzzer harness for the front end (through NIR lowering and analysis since Phase 3) | Implemented | 2 | `tests/fuzz/`, `make fuzz-run` |
+| F-200 | NIR: lowering with explicit check asserts, verifier, `--emit=nir` | Implemented | 3 | `src/nir/`, `tests/nir/` |
+| F-201 | LLVM IR generation; object, assembly, bitcode and LLVM IR output | Implemented | 3 | `src/codegen/`, `tests/codegen/`, driver cases |
+| F-202 | Checked integer arithmetic, division, shifts and conversions (panics) | Implemented | 3 | `tests/run/panic_*.nc` (one per check) |
+| F-203 | Optimisation levels `-O0`…`-Ofast` (`-Ofast` without `nnan`/`ninf`, D-040) | Implemented | 3 | every `tests/run/` test runs at each level |
+| F-204 | Hosted executables on x86_64-linux-gnu (linked by `cc`, D-042) | Implemented | 3 | `tests/run/` |
+| F-205 | Cross-compilation for AArch64 and RISC-V 64 (objects and executables) | Implemented | 3 | `tests/run/` under QEMU, `tests/codegen/target_*.nc` |
+| F-206 | DWARF 5 line tables (`-g`) | Implemented | 3 | `tests/codegen/debug_info.nc`, `-O2 -g` run configuration |
+| F-207 | Hosted default panic handler (weak, `dprintf` + `abort`), `-fpanic=minimal` | Implemented | 3 | `tests/run/panic_*.nc`, `tests/codegen/linkage_mangling.nc` |
+| F-208 | Definite initialisation of local variables (E5031; moved from F-402, D-041) | Implemented | 3 | `tests/diag/init_uninitialised.nc` |
 
-**There is no code generation yet.** NovaC programs in the Phase 2 subset
-can be checked (`ncc --check`) but not compiled or run.
+Programs in the Phase 2 language subset compile to native executables for
+x86-64, AArch64 and RISC-V 64 Linux.
 
-Known limitations of the Phase 2 front end (each is a later phase's
-feature, not a defect):
+Known limitations (each is a later phase's feature, not a defect):
 
 - Single-file programs only; `import` is rejected (F-500).
 - Only primitive types; every other type and construct is rejected with
   E9001 naming its phase.
-- Definite initialisation is not checked yet (F-402, Phase 5): `i32 x;
-  return x;` passes `--check`. No code is generated, so this cannot cause
-  undefined behaviour today.
+- No C interoperability yet (Phase 4): programs cannot call C functions
+  or print; they communicate only through their exit status and panics.
 
 ## Planned
 
 | ID | Feature | Status | Phase | Reference |
 | --- | --- | --- | --- | --- |
-| F-200 | NIR, lowering, verifier | Planned | 3 | NOVAC_COMPILER_ARCHITECTURE.md §9.1 |
-| F-201 | LLVM IR generation and object emission | Planned | 3 | NOVAC_COMPILER_ARCHITECTURE.md §9.4 |
-| F-202 | Checked integer arithmetic and conversions (panics) | Planned | 3 | NOVAC_TYPE_SYSTEM.md §2.2 |
-| F-203 | Optimisation levels `-O0`…`-Ofast` | Planned | 3 | NOVAC_COMPILER_ARCHITECTURE.md §10 |
-| F-204 | Hosted linking on x86_64-linux-gnu | Planned | 3 | NOVAC_ABI.md §8 |
-| F-205 | Cross-compiled objects for AArch64 and RISC-V 64 | Planned | 3 | NOVAC_ABI.md §2 |
-| F-206 | DWARF line tables | Planned | 3 | D-035 |
 | F-300 | Structs, unions, enums, arrays, typedef, statics, `switch` | Planned | 4 | NOVAC_TYPE_SYSTEM.md §3 |
 | F-301 | Raw pointers | Planned | 4 | NOVAC_TYPE_SYSTEM.md §3.6 |
 | F-302 | Modes, `unsafe` blocks and functions, unsafe-operation checks | Planned | 4 | NOVAC_MEMORY_MODEL.md §2, §6 |
@@ -63,7 +63,7 @@ feature, not a defect):
 | F-306 | `x86_64-novaris` target linking LibNovaC | Planned | 4 | NOVAC_ABI.md §10.1 |
 | F-400 | References, borrow checking (non-lexical), two-phase borrows | Planned | 5 | NOVAC_MEMORY_MODEL.md §4 |
 | F-401 | Ownership, moves, destructors, drop flags | Planned | 5 | NOVAC_MEMORY_MODEL.md §3 |
-| F-402 | Definite initialisation | Planned | 5 | NOVAC_MEMORY_MODEL.md §5.2 |
+| F-402 | Initialisation of moved-from places (locals: F-208) | Planned | 5 | NOVAC_MEMORY_MODEL.md §5.2 |
 | F-403 | Lifetime elision | Planned | 5 | NOVAC_MEMORY_MODEL.md §5.1 |
 | F-404 | Explicit lifetimes, references in structs | Planned | 5 | Q-07 |
 | F-405 | Bounds checks and check elimination | Planned | 5 | NOVAC_MEMORY_MODEL.md §7 |

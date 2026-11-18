@@ -187,7 +187,7 @@ struct nc_expr {
     const nc_type *type;  /* set by sema */
     nc_cval cval;         /* set by sema for constant expressions */
     nc_binding_kind binding_kind;
-    void *binding;        /* NAME: struct nc_var* or nc_decl* */
+    void *binding;        /* NAME: struct nc_var* or struct nc_fn_info* (sema/symbols.h) */
     union {
         struct {
             uint64_t value;
@@ -356,6 +356,7 @@ struct nc_decl {
             uint32_t nparams;
             bool variadic;
             nc_stmt *body;      /* NULL for a declaration without body */
+            struct nc_fn_info *info; /* set by sema; NULL for a rejected duplicate */
         } fn;
         const char *unsupported; /* "struct", "import", ... */
     } u;
