@@ -1,0 +1,28 @@
+(module shapes
+  (struct Point
+    (field i32 x)
+    (field public i32 y))
+  (struct Header (attr packed)
+    (field u8 tag)
+    (field u32 len))
+  (struct Opaque opaque)
+  (union Value
+    (field i64 i)
+    (field f64 f))
+  (enum Kind u8 (Circle) (Square (int 4)) (Tri))
+  (typedef Quad (array (path Point) (int 4)))
+  (static PRIMES (array (const i32) (int 3)) (list (int 2) (int 3) (at (int 2) (int 5))))
+  (static origin (path Point) (list (field x (int 0)) (field y (int 0))))
+  (constexpr N usize (binary * (int 2) (int 4)))
+  (fn f (ret i32) (params (param (path Kind) k) (param (path Point) p))
+    (block
+      (decl (path Quad) (var q (list (name p) (struct-lit (path Point) (int 1) (int 2)) (list (field y (int 3))))))
+      (switch (name k)
+        (case (member (name Kind) Circle) (member (name Kind) Square)
+          (expr (assign = (member (index (name q) (int 0)) x) (binary + (binary + (sizeof (name Point)) (alignof i64)) (offsetof (path Point) y))))
+          (fallthrough))
+        (case (member (name Kind) Tri)
+          (break))
+        (default
+          (return (char 97))))
+      (return (member (index (name q) (int 1)) y)))))

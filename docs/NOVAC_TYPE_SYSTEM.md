@@ -117,8 +117,10 @@ generic pointer: the untyped pointer type is `u8*` / `const u8*`; C's
 A fixed-length sequence of `N` elements, `N` a constant expression of type
 `usize`. Arrays are values: assignment and parameter passing copy (if `T`
 is Copy) or move the whole array. An array does **not** decay to a
-pointer. Indexing `a[i]` requires `i: usize` (integer literals adapt) and
-is bounds-checked (NOVAC_MEMORY_MODEL.md §7).
+pointer. Indexing `a[i]` requires `i: usize` (integer literals adapt;
+`u8`, `u16` and `u32` widen implicitly) and is bounds-checked
+(NOVAC_MEMORY_MODEL.md §7); indexing a non-array is E4074. `N` must be a
+constant of at least 1 (E4089).
 
 `&a` or `&mut a` coerces to `slice<const T>` / `slice<T>`.
 
@@ -128,7 +130,8 @@ is bounds-checked (NOVAC_MEMORY_MODEL.md §7).
 struct Point { public f64 x; public f64 y; }
 ```
 
-Nominal; layout as C (D-017). Fields are private to the declaring module
+Nominal; layout as C (D-017). Struct values can be assigned, passed and
+returned (they are copied); `==` is not defined on them (E4011). Fields are private to the declaring module
 unless `public`. Struct values are created with initialiser lists:
 
 ```c
@@ -136,15 +139,26 @@ Point p = { .x = 1.0, .y = 2.0 };      // designated
 Point q = Point{ .x = 0.0, .y = 0.0 }; // expression form
 ```
 
-Every field must be initialised (no implicit zero-fill) unless the
-initialiser is `uninit` (unsafe; NOVAC_MEMORY_MODEL.md §5).
+Positional values fill fields in order; a designator `.f =` moves to field
+`f`, and positional values continue after it. Each field is initialised at
+most once (E4085). An omitted field is zero, provided zero is a valid value
+of its type (D-043); otherwise omitting it is E4081. `{}` zero-initialises
+the whole value. `uninit` leaves it uninitialised (unsafe;
+NOVAC_MEMORY_MODEL.md §5). Arrays use the same rules, with `[i] =` element
+designators (constant `i`, E4082; within the length, E5040).
+
+A struct may not contain itself by value (E4080); `struct Name;` declares
+an opaque struct, which can only be used behind a pointer (E4088).
+Layout attributes are `@packed` (structs only) and `@repr(C)`, which is
+the default (D-017).
 
 ### 3.3 Unions
 
 Untagged, C-compatible. All fields must be Copy and the union has no
 destructor. Writing a field is safe; **reading** a field is an unsafe
 operation (NOVAC_MEMORY_MODEL.md §6), because nothing records which field
-was last written.
+was last written. An initialiser sets one field, `{.f = v}` or `{v}` for
+the first field (E4087 for more), and zeroes the remaining bytes.
 
 ### 3.4 Enums
 
@@ -156,7 +170,12 @@ An enum has an underlying integer type (default `i32`, which matches the C
 ABI on all version-1 targets). Values are the enumerators only: converting
 an integer to an enum with `Color(x)` panics if `x` is not an enumerator
 value. `u8(c)` converts to the underlying value. Enumerators are scoped:
-`Color.Red`. `switch` over an enum must be exhaustive or have `default`.
+`Color.Red`. `switch` over an enum must be exhaustive or have `default`
+(E4071). Enums support `==` and `!=` only; arithmetic and ordering need a
+conversion to the underlying type (E4011). Enumerator values are constant
+expressions of the underlying type (E4082); an implicit value is the
+previous one plus 1 and must fit (E4040). The underlying type must be an
+integer type (E4090).
 C-style "flag" enums that combine bits are not enums in NovaC: use
 integer constants or a `bitset` type (planned).
 
@@ -381,7 +400,9 @@ during constant evaluation is a compile error.
 ## 10. Type equivalence and aliases
 
 Types are nominal for structs, unions, enums and interfaces; structural for
-everything else. `typedef` introduces an alias, not a new type.
+everything else. `typedef` introduces an alias, not a new type. An alias
+defined in terms of itself is E3005, and naming something that is not a
+type where a type is expected is E3006.
 
 ## 11. Diagnostics (type system)
 
@@ -408,6 +429,22 @@ everything else. `typedef` introduces an alias, not a new type.
 | E4062 | `break` or `continue` outside a loop |
 | E4064 | `auto` variable without an initialiser |
 | E4065 | immutable variable without an initialiser |
+| E4071 | `switch` over an enum without `default` does not handle every enumerator |
+| E4073 | `switch` operand that is not an integer, enum or `bool` |
+| E4074 | indexing a value that is not an array |
+| E4075 | field access on a type without fields (or `offsetof` on one) |
+| E4080 | struct or union that contains itself by value |
+| E4081 | omitted initialiser member whose type has no zero value (D-043) |
+| E4082 | non-constant expression where a constant is required (static initialiser, case value, enumerator value, designator) |
+| E4083 | type name used as a value |
+| E4084 | no field or enumerator with that name |
+| E4085 | field or element initialised more than once |
+| E4086 | `static` without an initialiser |
+| E4087 | initialiser list that does not fit the type (too many values, wrong designator kind, list for a scalar or for `auto`) |
+| E4088 | opaque type used by value |
+| E4089 | array length that is not a constant of at least 1, or a type larger than 2^47 bytes |
+| E9005 | initialiser lists for arrays in one module expand to more than 2^22 elements (implementation limit; `{}` has no limit) |
+| E4090 | enum underlying type that is not an integer type |
 | W4001 | expression statement whose result is unused |
 | W4002 | division by a constant zero (always panics at run time) |
 

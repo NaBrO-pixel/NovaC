@@ -1,0 +1,14 @@
+(module -
+  (struct Point
+    (field i32 x)
+    (field i32 y))
+  (enum Dir u8 (North (int 1 :u8 =1)) (East) (South (int 8 :u8 =8)))
+  (constexpr K i32 (binary * (int 3 :{integer} =3) (int 7 :{integer} =7) :i32 =21))
+  (static T (array (const u16) (int 3 :usize =3)) (aggregate (int 1 :u16 =1) - (int 9 :u16 =9) :u16[3]))
+  (fn f (ret i32) (params (param (path Point) p))
+    (block
+      (decl (path Point) (var q (aggregate - (name K :i32 =21) :Point)))
+      (decl (array i32 (int 3 :usize =3)) (var a (aggregate (member (name p :Point) x :i32) (member (name q :Point) y :i32) - :i32[3])))
+      (decl (path Dir) (var d (convert (path Dir) (int 8 :{integer} =8) :Dir =8)))
+      (decl usize (var s (binary + (sizeof (name Point :Point) :usize =8) (offsetof (path Point) y :usize =4) :usize =12)))
+      (return (binary + (binary + (binary + (binary + (index (name a :i32[3]) (int 1 :usize =1) :i32) (convert i32 (index (name T :u16[3]) (int 2 :usize =2) :u16) :i32) :i32) (convert i32 (member (name Dir :Dir) East :Dir =2) :i32 =2) :i32) (convert i32 (name d :Dir) :i32) :i32) (convert i32 (name s :usize) :i32) :i32)))))

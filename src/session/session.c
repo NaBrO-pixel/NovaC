@@ -6,6 +6,7 @@ void nc_session_init(nc_session *s, FILE *diag_out)
     nc_strtab_init(&s->strtab);
     nc_arena_init(&s->arena);
     nc_diag_init(&s->diag, &s->sources, diag_out);
+    s->types = NULL;
 }
 
 void nc_session_free(nc_session *s)

@@ -84,10 +84,6 @@ static nc_stmt *unsupported(nc_parser *p, const char *what, int phase)
     s->u.unsupported = what;
     nc_p_recoverable(p, t->span, "E9001", "'%s' is not implemented in this version (Phase %d)", what, phase);
     switch (t->kind) {
-    case NC_T_KW_SWITCH:
-        if (nc_p_at(p, NC_T_LPAREN)) nc_p_skip_balanced(p);
-        if (nc_p_at(p, NC_T_LBRACE)) nc_p_skip_balanced(p);
-        break;
     case NC_T_KW_UNSAFE:
         if (nc_p_at(p, NC_T_LBRACE)) nc_parse_block(p);
         break;
@@ -99,6 +95,64 @@ static nc_stmt *unsupported(nc_parser *p, const char *what, int phase)
         break;
     }
     s->span = nc_span_join(s->span, nc_p_prev(p)->span);
+    return s;
+}
+
+/* switch (expr) { case a, b: stmts  default: stmts } (D-025) */
+static nc_stmt *switch_stmt(nc_parser *p)
+{
+    const nc_token *kw = nc_p_advance(p);
+    nc_stmt *s = nc_p_stmt(p, NC_S_SWITCH, kw->span);
+    if (!nc_p_expect(p, NC_T_LPAREN, "'(' after 'switch'")) return s;
+    s->u.switch_.expr = nc_parse_expr(p);
+    nc_p_expect(p, NC_T_RPAREN, "')'");
+    if (!nc_p_expect(p, NC_T_LBRACE, "'{' to begin the cases")) return s;
+    NC_VEC(nc_case) cases = {0};
+    while (!nc_p_at(p, NC_T_RBRACE) && !nc_p_at(p, NC_T_EOF)) {
+        nc_case c = {0};
+        c.span = nc_p_cur_span(p);
+        if (nc_p_accept(p, NC_T_KW_DEFAULT)) {
+            c.is_default = true;
+        } else if (nc_p_accept(p, NC_T_KW_CASE)) {
+            nc_expr_vec vals = {0};
+            do {
+                nc_vec_push(&vals, nc_parse_expr(p));
+            } while (nc_p_accept(p, NC_T_COMMA) && !p->panic);
+            c.nvalues = (uint32_t)vals.len;
+            c.values = nc_p_expr_list(p, &vals);
+        } else {
+            nc_p_expected(p, "'case' or 'default'");
+            nc_p_sync_stmt(p);
+            p->panic = false;
+            continue;
+        }
+        if (!nc_p_expect(p, NC_T_COLON, "':' after the case label")) {
+            nc_p_sync_stmt(p);
+            p->panic = false;
+        }
+        nc_stmt_vec stmts = {0};
+        while (!nc_p_at(p, NC_T_KW_CASE) && !nc_p_at(p, NC_T_KW_DEFAULT) && !nc_p_at(p, NC_T_RBRACE) &&
+               !nc_p_at(p, NC_T_EOF)) {
+            uint32_t before = p->pos;
+            nc_stmt *st = nc_parse_stmt(p);
+            if (st) nc_vec_push(&stmts, st);
+            if (p->panic) {
+                nc_tok last = nc_p_prev(p)->kind;
+                if (p->pos == before || (last != NC_T_SEMI && last != NC_T_RBRACE)) nc_p_sync_stmt(p);
+                p->panic = false;
+            }
+            if (p->pos == before) nc_p_advance(p);
+        }
+        c.nstmts = (uint32_t)stmts.len;
+        c.stmts = stmts.len ? nc_arena_memdup(&p->s->arena, stmts.data, stmts.len * sizeof *stmts.data) : NULL;
+        nc_vec_free(&stmts);
+        nc_vec_push(&cases, c);
+    }
+    nc_p_expect(p, NC_T_RBRACE, "'}' to close the switch");
+    s->u.switch_.ncases = (uint32_t)cases.len;
+    s->u.switch_.cases = cases.len ? nc_arena_memdup(&p->s->arena, cases.data, cases.len * sizeof *cases.data) : NULL;
+    nc_vec_free(&cases);
+    s->span = nc_span_join(kw->span, nc_p_prev(p)->span);
     return s;
 }
 
@@ -236,8 +290,20 @@ nc_stmt *nc_parse_stmt(nc_parser *p)
         if (!nc_p_at(p, NC_T_SEMI)) s->u.ret = nc_parse_expr(p);
         nc_p_expect(p, NC_T_SEMI, "';'");
         break;
-    case NC_T_KW_SWITCH: return unsupported(p, "switch", 4);
-    case NC_T_KW_FALLTHROUGH: return unsupported(p, "fallthrough", 4);
+    case NC_T_KW_SWITCH: {
+        if (!nc_p_enter(p)) {
+            nc_p_sync_stmt(p);
+            return nc_p_stmt(p, NC_S_EMPTY, t->span);
+        }
+        s = switch_stmt(p);
+        nc_p_leave(p);
+        return s;
+    }
+    case NC_T_KW_FALLTHROUGH:
+        nc_p_advance(p);
+        s = nc_p_stmt(p, NC_S_FALLTHROUGH, t->span);
+        nc_p_expect(p, NC_T_SEMI, "';'");
+        break;
     case NC_T_KW_UNSAFE: return unsupported(p, "unsafe", 4);
     case NC_T_KW_DEFER: return unsupported(p, "defer", 6);
     case NC_T_KW_ASM: return unsupported(p, "asm", 7);

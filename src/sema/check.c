@@ -73,48 +73,6 @@ nc_fn_info *nc_sema_find_fn(nc_sema *sm, nc_sym name)
     return NULL;
 }
 
-/* ---- types ---------------------------------------------------------------------------------- */
-
-const nc_type *nc_sema_resolve_type(nc_sema *sm, const nc_type_expr *te, bool *is_const)
-{
-    *is_const = te->is_const;
-    const char *what = NULL;
-    int phase = 0;
-    switch (te->kind) {
-    case NC_TE_PRIM: return nc_ty_prim(te->u.prim);
-    case NC_TE_ERROR: return nc_ty_error();
-    case NC_TE_SELF: what = "`Self` is"; phase = 5; break;
-    case NC_TE_PTR: what = "pointer types are"; phase = 4; break;
-    case NC_TE_REF: what = "reference types are"; phase = 5; break;
-    case NC_TE_ARRAY: what = "array types are"; phase = 4; break;
-    case NC_TE_FN: what = "function pointer types are"; phase = 4; break;
-    case NC_TE_PATH: {
-        const nc_path *p = &te->u.path.path;
-        const char *first = nc_sema_sym(sm, p->parts[0]);
-        if (p->count > 1) {
-            what = "types from other modules are";
-            phase = 6;
-        } else if (strcmp(first, "slice") == 0 || strcmp(first, "optional") == 0 ||
-                   strcmp(first, "result") == 0 || strcmp(first, "str") == 0) {
-            nc_diag_error(NC_DIAG(sm), te->span, "E9001", "'%s' is not implemented in this version (Phase 6)", first);
-            return nc_ty_error();
-        } else if (strcmp(first, "atomic") == 0) {
-            nc_diag_error(NC_DIAG(sm), te->span, "E9001", "'atomic' is not implemented in this version (Phase 8)");
-            return nc_ty_error();
-        } else if (strcmp(first, "mmio") == 0) {
-            nc_diag_error(NC_DIAG(sm), te->span, "E9001", "'mmio' is not implemented in this version (Phase 7)");
-            return nc_ty_error();
-        } else {
-            nc_diag_error(NC_DIAG(sm), te->span, "E3001", "unknown type '%s'", first);
-            return nc_ty_error();
-        }
-        break;
-    }
-    }
-    nc_diag_error(NC_DIAG(sm), te->span, "E9001", "%s not implemented in this version (Phase %d)", what, phase);
-    return nc_ty_error();
-}
-
 /* ---- statements ------------------------------------------------------------------------------ */
 
 static bool is_true_const(const nc_expr *e)
@@ -126,12 +84,17 @@ static void check_var_decl(nc_sema *sm, nc_stmt *s)
 {
     nc_var_decl *v = &s->u.decl;
     if (v->is_static) {
-        nc_diag_error(NC_DIAG(sm), s->span, "E9001", "`static` local variables are not implemented in this version (Phase 4)");
+        nc_diag_error(NC_DIAG(sm), s->span, "E9001",
+                      "`static` local variables are not implemented in this version; declare the static at module level");
         return;
     }
     const nc_type *declared = NULL;
     bool is_const = v->auto_const;
-    if (!v->is_auto) declared = nc_sema_resolve_type(sm, v->type, &is_const);
+    if (!v->is_auto) {
+        declared = nc_sema_resolve_type(sm, v->type, &is_const);
+        if (!nc_ty_is_error(declared) && !nc_ty_is_void(declared) && !nc_sema_complete(sm, declared, v->type->span))
+            declared = nc_ty_error();
+    }
 
     for (uint32_t i = 0; i < v->ndecls; i++) {
         nc_declarator *d = &v->decls[i];
@@ -145,16 +108,20 @@ static void check_var_decl(nc_sema *sm, nc_stmt *s)
          * it inside its own initialiser is an error (E3003). */
         nc_var *var = nc_scope_declare(sm, d->name, t ? t : nc_ty_error(), is_const, d->span);
         var->initializing = true;
-        if (d->init && d->init->kind != NC_INIT_EXPR) {
-            nc_diag_error(NC_DIAG(sm), d->init->span, "E9001", "%s not implemented in this version (Phase 4)",
-                          d->init->kind == NC_INIT_LIST ? "initialiser lists are" : "`uninit` is");
+        char what[96];
+        snprintf(what, sizeof what, "the initialiser of '%s'", name);
+        if (d->init && d->init->kind == NC_INIT_UNINIT) {
+            nc_diag_error(NC_DIAG(sm), d->init->span, "E9001", "`uninit` is not implemented in this version (Phase 4)");
+        } else if (d->init && t) {
+            nc_sema_check_init(sm, d->init, t, what);
+        } else if (d->init && d->init->kind == NC_INIT_LIST) {
+            nc_diag_error(NC_DIAG(sm), d->init->span, "E4087",
+                          "the type of 'auto' variable '%s' cannot be inferred from an initialiser list", name);
+            t = nc_ty_error();
         } else if (d->init) {
-            char what[96];
-            snprintf(what, sizeof what, "the initialiser of '%s'", name);
-            nc_check_value(sm, &d->init->expr, t);
-            if (t) nc_coerce(sm, &d->init->expr, t, what);
-            else nc_default_untyped(sm, &d->init->expr);
-            if (!t) t = d->init->expr->type;
+            nc_check_value(sm, &d->init->expr, NULL);
+            nc_default_untyped(sm, &d->init->expr);
+            t = d->init->expr->type;
         } else if (v->is_auto) {
             nc_diag_error(NC_DIAG(sm), d->span, "E4064", "'auto' variable '%s' needs an initialiser to infer its type", name);
         } else if (is_const) {
@@ -178,7 +145,7 @@ static bool check_sub(nc_sema *sm, nc_stmt *s)
  * `continue` (which proceeds to the loop condition). */
 static bool check_loop_body(nc_sema *sm, nc_stmt *body, bool *has_break)
 {
-    nc_loop_ctx ctx = {false, false};
+    nc_loop_ctx ctx = {false, false, false};
     nc_vec_push(&sm->loops, ctx);
     bool term = check_sub(sm, body);
     nc_loop_ctx done = sm->loops.data[sm->loops.len - 1];
@@ -210,9 +177,151 @@ static bool check_return(nc_sema *sm, nc_stmt *s)
     return true;
 }
 
+/* ---- switch (D-025) ------------------------------------------------------------------------ */
+
+static bool same_case_value(nc_cval a, nc_cval b)
+{
+    if (a.kind == NC_CV_BOOL) return a.b == b.b;
+    return nc_cv_cmp(a, b) == 0;
+}
+
+/* Is every value of `t` covered by a case? Reports the missing enumerators
+ * of an enum (E4071) when `report`. */
+static bool switch_exhaustive(nc_sema *sm, nc_stmt *s, const nc_type *t, bool report)
+{
+    nc_case *cs = s->u.switch_.cases;
+    uint32_t nc = s->u.switch_.ncases;
+    if (nc_ty_is_bool(t)) {
+        bool seen[2] = {false, false};
+        for (uint32_t i = 0; i < nc; i++)
+            for (uint32_t k = 0; k < cs[i].nvalues; k++)
+                if (cs[i].values[k]->cval.kind == NC_CV_BOOL) seen[cs[i].values[k]->cval.b] = true;
+        return seen[0] && seen[1];
+    }
+    if (!nc_ty_is_enum(t)) return false;
+    nc_enum_type *en = t->en;
+    char missing[256];
+    size_t len = 0;
+    unsigned nmissing = 0;
+    missing[0] = 0;
+    for (uint32_t e = 0; e < en->nitems; e++) {
+        bool found = false;
+        for (uint32_t i = 0; i < nc && !found; i++)
+            for (uint32_t k = 0; k < cs[i].nvalues && !found; k++)
+                if (cs[i].values[k]->cval.kind == NC_CV_INT && same_case_value(cs[i].values[k]->cval, en->items[e].value))
+                    found = true;
+        /* An enumerator with the same value as an earlier one is covered with it. */
+        for (uint32_t p = 0; p < e && !found; p++)
+            if (same_case_value(en->items[p].value, en->items[e].value)) found = true;
+        if (found) continue;
+        if (nmissing < 4 && len < sizeof missing - 64)
+            len += (size_t)snprintf(missing + len, sizeof missing - len, "%s'%s'", nmissing ? ", " : "",
+                                    nc_sema_sym(sm, en->items[e].name));
+        nmissing++;
+    }
+    if (nmissing == 0) return true;
+    if (report) {
+        nc_diag_error(NC_DIAG(sm), s->u.switch_.expr->span, "E4071",
+                      "switch over enum '%s' does not handle %s%s", t->name, missing, nmissing > 4 ? ", ..." : "");
+        nc_diag_help(NC_DIAG(sm), "add the missing cases or a `default:` case (D-025)");
+    }
+    return false;
+}
+
+static bool check_switch(nc_sema *sm, nc_stmt *s)
+{
+    const nc_type *t = nc_check_value(sm, &s->u.switch_.expr, NULL);
+    nc_default_untyped(sm, &s->u.switch_.expr);
+    t = s->u.switch_.expr->type;
+    bool ok_type = !nc_ty_is_error(t);
+    if (ok_type && !nc_ty_is_integer(t) && !nc_ty_is_enum(t) && !nc_ty_is_bool(t)) {
+        nc_diag_error(NC_DIAG(sm), s->u.switch_.expr->span, "E4073",
+                      "switch operand must have an integer, enum or 'bool' type, found '%s'", nc_type_name(t));
+        ok_type = false;
+    }
+    nc_case *cs = s->u.switch_.cases;
+    uint32_t ncases = s->u.switch_.ncases;
+    bool has_default = false;
+    nc_span default_span = NC_NO_SPAN;
+    for (uint32_t i = 0; i < ncases; i++) {
+        nc_case *c = &cs[i];
+        if (c->is_default) {
+            if (has_default) {
+                nc_diag_error(NC_DIAG(sm), c->span, "E4070", "duplicate `default` case");
+                nc_diag_note(NC_DIAG(sm), default_span, "the first `default` is here");
+            }
+            has_default = true;
+            default_span = c->span;
+        }
+        for (uint32_t k = 0; k < c->nvalues; k++) {
+            nc_expr **slot = &c->values[k];
+            nc_check_value(sm, slot, ok_type ? t : NULL);
+            if (!ok_type) continue;
+            if (!nc_coerce(sm, slot, t, "a case value") || nc_ty_is_error((*slot)->type)) continue;
+            if ((*slot)->cval.kind == NC_CV_NONE) {
+                nc_diag_error(NC_DIAG(sm), (*slot)->span, "E4082", "a case value must be a constant expression");
+                (*slot)->type = nc_ty_error();
+                continue;
+            }
+            for (uint32_t pi = 0; pi <= i; pi++) {
+                uint32_t pk_end = pi == i ? k : cs[pi].nvalues;
+                for (uint32_t pk = 0; pk < pk_end; pk++) {
+                    nc_expr *prev = cs[pi].values[pk];
+                    if (prev->cval.kind != NC_CV_NONE && !nc_ty_is_error(prev->type) &&
+                        same_case_value(prev->cval, (*slot)->cval)) {
+                        char buf[64];
+                        if ((*slot)->cval.kind == NC_CV_BOOL) snprintf(buf, sizeof buf, "%s", (*slot)->cval.b ? "true" : "false");
+                        else nc_cv_format((*slot)->cval, buf, sizeof buf);
+                        nc_diag_error(NC_DIAG(sm), (*slot)->span, "E4070", "duplicate case value %s", buf);
+                        nc_diag_note(NC_DIAG(sm), prev->span, "the value is first handled here");
+                        goto next_value;
+                    }
+                }
+            }
+        next_value:;
+        }
+    }
+
+    nc_loop_ctx ctx = {true, false, false};
+    nc_vec_push(&sm->loops, ctx);
+    bool last_term = false;
+    for (uint32_t i = 0; i < ncases; i++) {
+        nc_case *c = &cs[i];
+        bool final_case = i + 1 == ncases;
+        bool term = false;
+        nc_scope_push(sm);
+        for (uint32_t k = 0; k < c->nstmts; k++) {
+            sm->fallthrough_ok = !final_case && k + 1 == c->nstmts;
+            if (nc_check_stmt(sm, c->stmts[k])) term = true;
+        }
+        sm->fallthrough_ok = false;
+        nc_scope_pop(sm);
+        if (!final_case && c->nstmts && !term) {
+            nc_diag_error(NC_DIAG(sm), c->span, "E2050", "this case falls through to the next one");
+            nc_diag_help(NC_DIAG(sm), "end it with `break;`, or write `fallthrough;` if falling through is intended (D-025)");
+        }
+        if (final_case) last_term = term;
+    }
+    nc_loop_ctx done = sm->loops.data[--sm->loops.len];
+    if (done.has_continue) {
+        /* `continue` inside a switch continues the enclosing loop. */
+        for (size_t i = sm->loops.len; i-- > 0;)
+            if (!sm->loops.data[i].is_switch) {
+                sm->loops.data[i].has_continue = true;
+                break;
+            }
+    }
+
+    bool exhaustive = has_default;
+    if (!has_default && ok_type) exhaustive = switch_exhaustive(sm, s, t, nc_ty_is_enum(t));
+    return exhaustive && !done.has_break && last_term && ncases > 0;
+}
+
 bool nc_check_stmt(nc_sema *sm, nc_stmt *s)
 {
     if (!s) return false;
+    bool fallthrough_ok = sm->fallthrough_ok;
+    sm->fallthrough_ok = false; /* nested statements are never the last statement of a case */
     switch (s->kind) {
     case NC_S_BLOCK: {
         bool term = false;
@@ -254,16 +363,33 @@ bool nc_check_stmt(nc_sema *sm, nc_stmt *s)
         nc_scope_pop(sm);
         return (!s->u.for_.cond || is_true_const(s->u.for_.cond)) && !has_break;
     }
-    case NC_S_BREAK:
-    case NC_S_CONTINUE:
-        if (sm->loops.len == 0) {
-            nc_diag_error(NC_DIAG(sm), s->span, "E4062", "'%s' outside of a loop",
-                          s->kind == NC_S_BREAK ? "break" : "continue");
+    case NC_S_SWITCH:
+        return check_switch(sm, s);
+    case NC_S_FALLTHROUGH:
+        if (!fallthrough_ok) {
+            nc_diag_error(NC_DIAG(sm), s->span, "E2051",
+                          "`fallthrough` must be the last statement of a case that has a following case");
             return false;
         }
-        if (s->kind == NC_S_BREAK) sm->loops.data[sm->loops.len - 1].has_break = true;
-        else sm->loops.data[sm->loops.len - 1].has_continue = true;
+        return true;
+    case NC_S_BREAK:
+        if (sm->loops.len == 0) {
+            nc_diag_error(NC_DIAG(sm), s->span, "E4062", "'break' outside of a loop or switch");
+            return false;
+        }
+        sm->loops.data[sm->loops.len - 1].has_break = true;
         return true; /* control does not reach the next statement */
+    case NC_S_CONTINUE: {
+        size_t i = sm->loops.len;
+        while (i > 0 && sm->loops.data[i - 1].is_switch) i--;
+        if (i == 0) {
+            nc_diag_error(NC_DIAG(sm), s->span, "E4062", "'continue' outside of a loop");
+            return false;
+        }
+        /* Recorded on the innermost construct; a switch passes it outward. */
+        sm->loops.data[sm->loops.len - 1].has_continue = true;
+        return true;
+    }
     case NC_S_RETURN:
         return check_return(sm, s);
     case NC_S_EXPR:
@@ -278,17 +404,9 @@ bool nc_check_stmt(nc_sema *sm, nc_stmt *s)
 
 /* ---- declarations ---------------------------------------------------------------------------- */
 
-static void reject_attrs(nc_sema *sm, const nc_attr *a, uint32_t n)
-{
-    for (uint32_t i = 0; i < n; i++)
-        nc_diag_error(NC_DIAG(sm), a[i].span, "E9001", "attribute '@%s' is not implemented in this version",
-                      nc_sema_sym(sm, a[i].name));
-}
-
 static nc_fn_info *declare_function(nc_sema *sm, nc_decl *d)
 {
-    const char *name = nc_sema_sym(sm, d->u.fn.name);
-    reject_attrs(sm, d->attrs, d->nattrs);
+    nc_sema_attrs(sm, d->attrs, d->nattrs, 0);
     if (d->u.fn.has_extern)
         nc_diag_error(NC_DIAG(sm), d->span, "E9001", "`extern` functions are not implemented in this version (Phase 4)");
     if (d->u.fn.is_unsafe)
@@ -304,30 +422,27 @@ static nc_fn_info *declare_function(nc_sema *sm, nc_decl *d)
     nc_fn_info *fn = nc_arena_alloc(&sm->s->arena, sizeof *fn);
     fn->decl = d;
     bool c;
-    fn->ret = nc_sema_resolve_type(sm, d->u.fn.ret, &c);
+    fn->ret = nc_sema_value_type(sm, d->u.fn.ret, &c, true, "a return value");
     fn->nparams = d->u.fn.nparams;
     fn->params = nc_arena_alloc(&sm->s->arena, (fn->nparams ? fn->nparams : 1) * sizeof *fn->params);
+    fn->param_const = nc_arena_alloc(&sm->s->arena, (fn->nparams ? fn->nparams : 1) * sizeof *fn->param_const);
     for (uint32_t i = 0; i < fn->nparams; i++) {
         nc_param *p = &d->u.fn.params[i];
-        const nc_type *t = nc_sema_resolve_type(sm, p->type, &c);
+        const nc_type *t = nc_sema_resolve_type(sm, p->type, &fn->param_const[i]);
         if (p->is_self) {
             nc_diag_error(NC_DIAG(sm), p->span, "E9001", "`self` parameters are not implemented in this version (Phase 5)");
             t = nc_ty_error();
         } else if (nc_ty_is_void(t)) {
             nc_diag_error(NC_DIAG(sm), p->span, "E4005", "parameter '%s' cannot have type 'void'", nc_sema_sym(sm, p->name));
             t = nc_ty_error();
+        } else if (!nc_ty_is_error(t) && !nc_sema_complete(sm, t, p->type->span)) {
+            t = nc_ty_error();
         }
         fn->params[i] = t;
     }
-
-    nc_fn_info *prev = nc_sema_find_fn(sm, d->u.fn.name);
-    if (prev) {
-        nc_diag_error(NC_DIAG(sm), d->u.fn.name_span, "E3002", "redefinition of function '%s'", name);
-        nc_diag_note(NC_DIAG(sm), prev->decl->u.fn.name_span, "previous definition is here");
-        return NULL;
-    }
     nc_vec_push(&sm->fns, fn);
     d->u.fn.info = fn;
+    d->sema = fn;
     return fn;
 }
 
@@ -339,8 +454,7 @@ static void check_function(nc_sema *sm, nc_fn_info *fn)
     for (uint32_t i = 0; i < d->u.fn.nparams; i++) {
         nc_param *p = &d->u.fn.params[i];
         if (p->is_self) continue;
-        bool is_const = p->type->is_const && p->type->kind == NC_TE_PRIM;
-        p->var = nc_scope_declare(sm, p->name, fn->params[i], is_const, p->span);
+        p->var = nc_scope_declare(sm, p->name, fn->params[i], fn->param_const[i], p->span);
     }
     /* Parameters and the body's outermost block share one scope, as in C. */
     bool term = false;
@@ -364,19 +478,25 @@ bool nc_sema_check(nc_session *s, nc_module_ast *m)
     sm.m = m;
     unsigned errors_before = s->diag.errors;
 
-    reject_attrs(&sm, m->attrs, m->nattrs);
+    nc_sema_attrs(&sm, m->attrs, m->nattrs, 0);
+    nc_sema_collect(&sm);
 
+    /* Signatures first, so that every function can be called from anywhere;
+     * then every other declaration, so that errors in unused ones are
+     * reported; then the bodies. */
     NC_VEC(nc_fn_info *) to_check = {0};
-    for (uint32_t i = 0; i < m->ndecls; i++) {
-        nc_decl *d = m->decls[i];
-        if (d->kind != NC_D_FUNCTION) continue;
-        nc_fn_info *fn = declare_function(&sm, d);
-        if (fn && d->u.fn.body) nc_vec_push(&to_check, fn);
+    for (size_t i = 0; i < sm.msyms.len; i++) {
+        if (sm.msyms.data[i].kind != NC_MSYM_FN) continue;
+        nc_fn_info *fn = declare_function(&sm, sm.msyms.data[i].decl);
+        sm.msyms.data[i].info = fn;
+        if (fn->decl->u.fn.body) nc_vec_push(&to_check, fn);
     }
+    nc_sema_resolve_decls(&sm);
     for (size_t i = 0; i < to_check.len; i++) check_function(&sm, to_check.data[i]);
 
     nc_vec_free(&to_check);
     nc_vec_free(&sm.fns);
+    nc_vec_free(&sm.msyms);
     nc_vec_free(&sm.scope);
     nc_vec_free(&sm.marks);
     nc_vec_free(&sm.loops);

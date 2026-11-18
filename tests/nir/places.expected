@@ -1,0 +1,67 @@
+module places
+
+static const S: i32[2]
+
+fn get(_0: Pair, _1: usize) -> i32 {
+    let _2: usize;
+    let _3: bool;
+    let _4: bool;
+    let _5: i32;
+    let _6: bool;
+  bb0:
+    _2 = _1
+    _3 = lt(_2, const 4usize)
+    assert _3, "index out of bounds" -> bb1
+  bb1:
+    (_0.v[_2], _4) = checked_add(_0.v[_2], _0.a)
+    assert !_4, "integer overflow in '+'" -> bb2
+  bb2:
+    (_5, _6) = checked_add(_0.v[2], @S[1])
+    assert !_6, "integer overflow in '+'" -> bb3
+  bb3:
+    return _5
+}
+
+fn make(_0: i32) -> Pair {
+    let _1: i32[4];
+    let _2: Pair;
+  bb0:
+    _1 = i32[4] { _0, zeroed i32, zeroed i32, zeroed i32 }
+    _2 = Pair { zeroed i32, _1 }
+    return _2
+}
+
+fn sw(_0: u8) -> i32 {
+    let _1: bool;
+    let _2: bool;
+    let _3: bool;
+    let _4: bool;
+    let _5: bool;
+    let _6: E;
+  bb0:
+    _1 = eq(_0, const 1u8)
+    _2 = eq(_0, const 2u8)
+    _3 = or(_1, _2)
+    _4 = eq(_0, const 5u8)
+    _5 = or(_3, _4)
+    assert _5, "value is not an enumerator of 'E'" -> bb1
+  bb1:
+    _6 = nop(_0 as E)
+    switch _6 [const 1E -> bb3, const 2E -> bb3, const 5E -> bb4] otherwise bb5
+  bb2:
+    assert const false, "control reached the end of a function without returning a value" -> bb9
+  bb3:
+    return const 1i32
+  bb4:
+    return const 2i32
+  bb5:
+    assert const false, "invalid enum value in switch" -> bb6
+  bb6:
+    unreachable
+  bb7:
+    goto bb4
+  bb8:
+    goto bb2
+  bb9:
+    unreachable
+}

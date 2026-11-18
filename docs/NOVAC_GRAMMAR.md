@@ -394,6 +394,7 @@ contents are a primitive type the parser reports **E2031** with the fix-it
 | E2020 | C-style array declarator (`int a[4]`) — fix-it `i32[4] a` |
 | E2031 | C-style cast — fix-it `T(x)` |
 | E2050 | `switch` case falls through without `fallthrough;` |
+| E2051 | `fallthrough;` that is not the last statement of a case followed by another case |
 | E2060 | `goto` (not supported, D-034) |
 | E9001 | construct recognised but not implemented in this version |
 | E9004 | syntax tree deeper than the implementation limit of 1000 levels (nesting, operator chains, postfix chains and type suffixes all count) |

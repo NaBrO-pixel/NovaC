@@ -6,6 +6,41 @@ released versions yet.
 
 ## [Unreleased]
 
+### Added — Phase 4a: aggregates, enums and `switch`
+
+- Structs (C layout, `@packed`, `@repr(C)`, opaque `struct Name;`), unions,
+  enums with an underlying integer type, fixed arrays `T[N]`, `typedef`,
+  `constexpr`, `static const`, character literals, `sizeof`, `alignof`,
+  `offsetof`. Module-level declarations may appear in any order; cycles
+  are detected (E3005, E4080).
+- Initialiser lists and struct literals with positional and designated
+  members; omitted members are zero when zero is a valid value (D-043).
+- `switch` with case lists, `default`, `fallthrough`, exhaustiveness for
+  enums and `bool`, and the D-025 fallthrough rule (E2050, E2051).
+- Run-time checks: array indices (`index out of bounds`) and integer to
+  enum conversions (`value is not an enumerator of 'E'`).
+- NIR places with field and element projections, aggregate values,
+  `switch` terminators and statics; the LLVM layout of every aggregate is
+  verified against the computed one.
+- Attributes are checked: unknown ones are E3040, misapplied ones E3041.
+- Diagnostics E2051, E3005, E3006, E3041, E4071, E4073 to E4075, E4080
+  to E4090, E9005.
+- NovaC's internal calling convention passes structs, unions and arrays
+  by address and returns them through a hidden pointer; aggregate copies
+  and zeroing use `memcpy`/`memset` (NOVAC_ABI.md §6).
+- Implementation limits: objects of at most 2^47 bytes (E4089), and at
+  most 2^22 array elements expanded by initialiser lists per module (E9005).
+
+### Fixed during Phase 4a
+
+- Accesses to fields inside `@packed` structs were emitted with the
+  field's natural alignment. They now use alignment 1.
+- A program passing a 200 KB struct by value crashed the compiler in LLVM
+  instruction selection after a minute; aggregates are now passed
+  indirectly (`tests/run/big_arrays.nc`).
+- The fuzz build did not track header dependencies, so a stale harness
+  object could be linked against changed structures.
+
 ### Added — Phase 3: native compilation
 
 - NIR (`src/nir/`): lowering of the checked AST to a control-flow graph in

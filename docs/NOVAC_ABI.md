@@ -99,10 +99,11 @@ signatures (E7031).
 
 Bitfields and flexible array members are not supported in version 1.
 
-In Phase 3 no value crosses a C ABI boundary except the generated `main`
-wrapper, and `bool` is LLVM `i1` in registers and locals. Phase 4 must
-give `bool` its one-byte memory form at FFI boundaries and in aggregates
-(as Clang does for `_Bool`) before `extern "C"` is enabled.
+In Phases 3 and 4a no value crosses a C ABI boundary except the generated
+`main` wrapper, and `bool` is LLVM `i1` in registers and locals. In
+aggregates LLVM stores `i1` in one byte, which matches §4. Before
+`extern "C"` is enabled, Phase 4c must give `bool` the representation
+the C ABI expects at FFI boundaries, as Clang does for `_Bool`.
 
 ## 5. C calling-convention lowering
 
@@ -141,6 +142,15 @@ on that target is rejected (E7032), not guessed.
 | `@callconv(preserve_all)` | callee saves all registers (LLVM `preserve_allcc`) | x86-64; other targets only where the pinned LLVM version supports it (checked at Phase 7) | kernel |
 | `@interrupt` | hardware interrupt handler (§6.1) | x86-64, RISC-V | kernel |
 | `@naked` | no prologue/epilogue; body must be a single `asm` statement | all | kernel |
+
+The NovaC-native convention is unstable and may change between compiler
+versions; only `extern "C"` functions have a stable ABI. As implemented
+since Phase 4a, it is the target C convention for scalar values, while
+structs, unions and arrays are passed indirectly: an argument is the
+address of the value, which the callee copies on entry, and a result is
+written through a hidden first parameter, so the function returns `void`.
+This avoids LLVM's element-by-element expansion of large first-class
+aggregates. The C ABI lowering for `extern "C"` (§5) is separate.
 
 ### 6.1 Interrupt handlers differ per architecture
 

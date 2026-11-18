@@ -262,6 +262,14 @@ static void expr(dumper *d, const nc_expr *e)
         fputc(' ', d->out);
         generic_args(d, e->u.generic.args, e->u.generic.nargs);
         break;
+    case NC_E_AGGREGATE:
+        fputs("(aggregate", d->out);
+        if (e->u.agg.nelems == 1 && e->type) fprintf(d->out, " #%u", e->u.agg.union_field);
+        for (uint32_t i = 0; i < e->u.agg.nelems; i++) {
+            fputc(' ', d->out);
+            expr(d, e->u.agg.elems[i]);
+        }
+        break;
     case NC_E_IS:
         fputs("(is ", d->out);
         expr(d, e->u.is.operand);
@@ -358,6 +366,27 @@ static void stmt(dumper *d, const nc_stmt *s, int depth)
         fputc(')', d->out);
         break;
     case NC_S_EMPTY: fputs("(empty)", d->out); break;
+    case NC_S_FALLTHROUGH: fputs("(fallthrough)", d->out); break;
+    case NC_S_SWITCH:
+        fputs("(switch ", d->out);
+        expr(d, s->u.switch_.expr);
+        for (uint32_t i = 0; i < s->u.switch_.ncases; i++) {
+            const nc_case *c = &s->u.switch_.cases[i];
+            indent(d, depth + 1);
+            if (c->is_default) {
+                fputs("(default", d->out);
+            } else {
+                fputs("(case", d->out);
+                for (uint32_t k = 0; k < c->nvalues; k++) {
+                    fputc(' ', d->out);
+                    expr(d, c->values[k]);
+                }
+            }
+            for (uint32_t k = 0; k < c->nstmts; k++) stmt(d, c->stmts[k], depth + 2);
+            fputc(')', d->out);
+        }
+        fputc(')', d->out);
+        break;
     case NC_S_UNSUPPORTED: fprintf(d->out, "(unsupported %s)", s->u.unsupported); break;
     }
 }
@@ -378,9 +407,62 @@ static void attrs(dumper *d, const nc_attr *a, uint32_t n)
 static void decl(dumper *d, const nc_decl *dc)
 {
     indent(d, 1);
-    if (dc->kind == NC_D_UNSUPPORTED) {
+    switch (dc->kind) {
+    case NC_D_UNSUPPORTED:
         fprintf(d->out, "(unsupported %s)", dc->u.unsupported);
         return;
+    case NC_D_STRUCT:
+    case NC_D_UNION:
+        fprintf(d->out, "(%s %s", dc->kind == NC_D_STRUCT ? "struct" : "union", sym(d, dc->u.agg.name));
+        if (dc->is_public) fputs(" public", d->out);
+        attrs(d, dc->attrs, dc->nattrs);
+        if (dc->u.agg.ngeneric) fprintf(d->out, " (generics %u)", dc->u.agg.ngeneric);
+        if (dc->u.agg.opaque) fputs(" opaque", d->out);
+        for (uint32_t i = 0; i < dc->u.agg.nfields; i++) {
+            const nc_field_decl *f = &dc->u.agg.fields[i];
+            indent(d, 2);
+            fprintf(d->out, "(field%s ", f->is_public ? " public" : "");
+            type_expr(d, f->type);
+            fprintf(d->out, " %s", sym(d, f->name));
+            attrs(d, f->attrs, f->nattrs);
+            fputc(')', d->out);
+        }
+        fputc(')', d->out);
+        return;
+    case NC_D_ENUM:
+        fprintf(d->out, "(enum %s", sym(d, dc->u.en.name));
+        if (dc->is_public) fputs(" public", d->out);
+        if (dc->u.en.underlying) {
+            fputc(' ', d->out);
+            type_expr(d, dc->u.en.underlying);
+        }
+        for (uint32_t i = 0; i < dc->u.en.nitems; i++) {
+            fprintf(d->out, " (%s", sym(d, dc->u.en.items[i].name));
+            if (dc->u.en.items[i].value) {
+                fputc(' ', d->out);
+                expr(d, dc->u.en.items[i].value);
+            }
+            fputc(')', d->out);
+        }
+        fputc(')', d->out);
+        return;
+    case NC_D_TYPEDEF:
+    case NC_D_STATIC:
+    case NC_D_CONSTEXPR:
+        fprintf(d->out, "(%s %s", dc->kind == NC_D_TYPEDEF ? "typedef" : dc->kind == NC_D_STATIC ? "static" : "constexpr",
+                sym(d, dc->u.var.name));
+        if (dc->is_public) fputs(" public", d->out);
+        attrs(d, dc->attrs, dc->nattrs);
+        fputc(' ', d->out);
+        type_expr(d, dc->u.var.type);
+        if (dc->u.var.init) {
+            fputc(' ', d->out);
+            init(d, dc->u.var.init);
+        }
+        fputc(')', d->out);
+        return;
+    case NC_D_FUNCTION:
+        break;
     }
     fprintf(d->out, "(fn %s", sym(d, dc->u.fn.name));
     if (dc->is_public) fputs(" public", d->out);

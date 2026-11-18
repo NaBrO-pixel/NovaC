@@ -392,7 +392,7 @@ static const nc_type *check_compare(nc_sema *sm, nc_expr *e)
     if (nc_ty_is_error(t)) return e->type;
     bool equality = op == NC_BIN_EQ || op == NC_BIN_NE;
     bool numeric = nc_ty_is_untyped(t) || nc_ty_is_numeric(t);
-    if (!(numeric || (equality && nc_ty_is_bool(t)))) {
+    if (!(numeric || (equality && (nc_ty_is_bool(t) || nc_ty_is_enum(t))))) {
         nc_diag_error(NC_DIAG(sm), e->span, "E4011", "operator '%s' cannot be applied to type '%s'", sp, nc_type_name(t));
         return e->type;
     }
@@ -468,11 +468,163 @@ static const nc_type *check_binary(nc_sema *sm, nc_expr *e, const nc_type *expec
     return fail(e);
 }
 
-/* ---- places ------------------------------------------------------------------------------ */
+/* ---- names, fields, indexing --------------------------------------------------------------- */
 
-/* An assignable place: in Phase 2, a mutable local variable or parameter.
- * Returns its type, or the error type (reported). */
-static const nc_type *check_place(nc_sema *sm, nc_expr **slot, const char *action)
+static const char *mutable_static_msg = "mutable statics can only be accessed in `unsafe` code, which is not implemented "
+                                        "in this version (Phase 4)";
+
+/* A NAME that is not a local variable: a module-level item. */
+static const nc_type *check_module_name(nc_sema *sm, nc_expr *e)
+{
+    const char *name = nc_sema_sym(sm, e->u.name);
+    nc_module_sym *ms = nc_sema_find_module_sym(sm, e->u.name);
+    if (!ms) {
+        nc_diag_error(NC_DIAG(sm), e->span, "E3001", "use of undeclared name '%s'", name);
+        return fail(e);
+    }
+    switch (ms->kind) {
+    case NC_MSYM_FN:
+        e->binding_kind = NC_BIND_FN;
+        e->binding = ms->info;
+        nc_diag_error(NC_DIAG(sm), e->span, "E9001", "functions used as values are not implemented in this version (Phase 4)");
+        nc_diag_help(NC_DIAG(sm), "to call '%s', write `%s(...)`", name, name);
+        return fail(e);
+    case NC_MSYM_CONST: {
+        nc_const_info *c = nc_sema_const(sm, ms);
+        if (c->state != NC_LAYOUT_DONE) return fail(e);
+        e->cval = c->value;
+        return set_type(e, c->type);
+    }
+    case NC_MSYM_STATIC: {
+        nc_static_info *st = nc_sema_static(sm, ms);
+        if (!st->type || nc_ty_is_error(st->type)) return fail(e);
+        if (!st->is_const) {
+            nc_diag_error(NC_DIAG(sm), e->span, "E9001", "%s", mutable_static_msg);
+            return fail(e);
+        }
+        e->binding_kind = NC_BIND_STATIC;
+        e->binding = st;
+        return set_type(e, st->type);
+    }
+    case NC_MSYM_AGGREGATE:
+    case NC_MSYM_ENUM:
+    case NC_MSYM_TYPEDEF: break;
+    }
+    nc_diag_error(NC_DIAG(sm), e->span, "E4083", "'%s' is a type, not a value", name);
+    return fail(e);
+}
+
+static const nc_type *check_name(nc_sema *sm, nc_expr *e)
+{
+    bool poisoned;
+    nc_var *v = nc_scope_use(sm, e->u.name, e->span, &poisoned);
+    if (poisoned) return fail(e);
+    if (v) {
+        e->binding_kind = NC_BIND_VAR;
+        e->binding = v;
+        return set_type(e, v->type);
+    }
+    return check_module_name(sm, e);
+}
+
+/* The type a NAME denotes if it names a type rather than a value
+ * (`Color.Red`, `sizeof(Point)`), else NULL. */
+static const nc_type *name_as_type(nc_sema *sm, const nc_expr *e)
+{
+    if (e->kind != NC_E_NAME || nc_scope_lookup(sm, e->u.name)) return NULL;
+    nc_module_sym *ms = nc_sema_find_module_sym(sm, e->u.name);
+    return ms ? nc_sema_msym_type(sm, ms) : NULL;
+}
+
+static const char *agg_kind(const nc_type *t)
+{
+    return nc_ty_is_union(t) ? "union" : "struct";
+}
+
+/* `base.name` where base has type bt. `reading`: the field's value is read
+ * (union fields can only be written in safe code). */
+static const nc_type *field_access(nc_sema *sm, nc_expr *e, const nc_type *bt, bool reading)
+{
+    const char *fname = nc_sema_sym(sm, e->u.member.name);
+    if (nc_ty_is_error(bt)) return fail(e);
+    if (!nc_ty_is_struct(bt) && !nc_ty_is_union(bt)) {
+        nc_diag_error(NC_DIAG(sm), e->u.member.name_span, "E4075", "type '%s' has no fields, so it has no field '%s'",
+                      nc_type_name(bt), fname);
+        return fail(e);
+    }
+    nc_aggregate *agg = bt->agg;
+    for (uint32_t i = 0; i < agg->nfields; i++) {
+        if (agg->fields[i].name != e->u.member.name) continue;
+        if (agg->is_union && reading) {
+            nc_diag_error(NC_DIAG(sm), e->span, "E9001",
+                          "reading a union field requires `unsafe`, which is not implemented in this version (Phase 4)");
+            return fail(e);
+        }
+        e->binding_kind = NC_BIND_FIELD;
+        e->binding = (void *)(uintptr_t)i;
+        return set_type(e, agg->fields[i].type);
+    }
+    nc_diag_error(NC_DIAG(sm), e->u.member.name_span, "E4084", "%s '%s' has no field named '%s'", agg_kind(bt),
+                  nc_type_name(bt), fname);
+    nc_diag_note(NC_DIAG(sm), agg->span, "'%s' is declared here", nc_type_name(bt));
+    return fail(e);
+}
+
+/* `E.name` for an enum type E. */
+static const nc_type *enumerator(nc_sema *sm, nc_expr *e, const nc_type *et)
+{
+    nc_expr *base = e->u.member.base;
+    if (!nc_ty_is_enum(et)) {
+        nc_diag_error(NC_DIAG(sm), base->span, "E4083", "'%s' is a type, not a value", nc_sema_sym(sm, base->u.name));
+        return fail(e);
+    }
+    base->type = et;
+    if (!nc_sema_complete(sm, et, base->span)) return fail(e);
+    nc_enum_type *en = et->en;
+    for (uint32_t i = 0; i < en->nitems; i++)
+        if (en->items[i].name == e->u.member.name) {
+            e->cval = en->items[i].value;
+            return set_type(e, et);
+        }
+    nc_diag_error(NC_DIAG(sm), e->u.member.name_span, "E4084", "enum '%s' has no enumerator named '%s'", et->name,
+                  nc_sema_sym(sm, e->u.member.name));
+    nc_diag_note(NC_DIAG(sm), en->span, "'%s' is declared here", et->name);
+    return fail(e);
+}
+
+static const nc_type *check_member(nc_sema *sm, nc_expr *e)
+{
+    const nc_type *et = name_as_type(sm, e->u.member.base);
+    if (et) return enumerator(sm, e, et);
+    const nc_type *bt = nc_check_value(sm, &e->u.member.base, NULL);
+    return field_access(sm, e, bt, true);
+}
+
+/* `base[index]` where base has type bt. */
+static const nc_type *index_access(nc_sema *sm, nc_expr *e, const nc_type *bt)
+{
+    const nc_type *usize = nc_ty_prim(NC_PRIM_USIZE);
+    nc_check_value(sm, &e->u.index.index, usize);
+    bool ok = nc_coerce(sm, &e->u.index.index, usize, "an array index") && !nc_ty_is_error(e->u.index.index->type);
+    if (nc_ty_is_error(bt)) return fail(e);
+    if (!nc_ty_is_array(bt)) {
+        nc_diag_error(NC_DIAG(sm), e->u.index.base->span, "E4074", "cannot index a value of type '%s'", nc_type_name(bt));
+        return fail(e);
+    }
+    nc_expr *ix = e->u.index.index;
+    if (ok && ix->cval.kind == NC_CV_INT && ix->cval.mag >= bt->len) {
+        nc_diag_error(NC_DIAG(sm), ix->span, "E5040", "index %llu is out of bounds for an array of length %llu",
+                      (unsigned long long)ix->cval.mag, (unsigned long long)bt->len);
+        return fail(e);
+    }
+    if (!ok) return fail(e);
+    return set_type(e, bt->elem);
+}
+
+/* An assignable place: a mutable variable, or a field or element of one.
+ * `reading`: the operation also reads the place (compound assignment,
+ * `++`). Returns its type, or the error type (reported). */
+static const nc_type *check_place(nc_sema *sm, nc_expr **slot, const char *action, bool reading)
 {
     nc_expr *e = *slot;
     if (e->kind == NC_E_NAME) {
@@ -491,11 +643,342 @@ static const nc_type *check_place(nc_sema *sm, nc_expr **slot, const char *actio
             }
             return v->type;
         }
+        nc_module_sym *ms = nc_sema_find_module_sym(sm, e->u.name);
+        if (ms && ms->kind == NC_MSYM_STATIC) {
+            nc_static_info *st = nc_sema_static(sm, ms);
+            if (!st->type || nc_ty_is_error(st->type)) return fail(e);
+            if (st->is_const) {
+                nc_diag_error(NC_DIAG(sm), e->span, "E4004", "cannot %s immutable static '%s'", action,
+                              nc_sema_sym(sm, st->name));
+                nc_diag_note(NC_DIAG(sm), st->span, "'%s' is declared `const` here", nc_sema_sym(sm, st->name));
+            } else {
+                nc_diag_error(NC_DIAG(sm), e->span, "E9001", "%s", mutable_static_msg);
+            }
+            return fail(e);
+        }
+    } else if (e->kind == NC_E_MEMBER && !name_as_type(sm, e->u.member.base)) {
+        const nc_type *bt = check_place(sm, &e->u.member.base, action, reading);
+        return field_access(sm, e, bt, reading);
+    } else if (e->kind == NC_E_INDEX) {
+        const nc_type *bt = check_place(sm, &e->u.index.base, action, reading);
+        return index_access(sm, e, bt);
     }
     const nc_type *t = check_expr(sm, slot, NULL);
     if (nc_ty_is_error(t)) return t;
     nc_diag_error(NC_DIAG(sm), (*slot)->span, "E4004", "cannot %s this expression; it is not a variable", action);
     return fail(*slot);
+}
+
+/* ---- sizes ---------------------------------------------------------------------------------- */
+
+static const nc_type *check_size(nc_sema *sm, nc_expr *e)
+{
+    bool is_size = e->kind == NC_E_SIZEOF;
+    const char *what = is_size ? "the operand of 'sizeof'" : "the operand of 'alignof'";
+    const nc_type *t;
+    bool c;
+    if (e->u.size.type) {
+        t = nc_sema_value_type(sm, e->u.size.type, &c, false, what);
+    } else if ((t = name_as_type(sm, e->u.size.expr)) != NULL) {
+        e->u.size.expr->type = t;
+        if (!nc_sema_complete(sm, t, e->u.size.expr->span)) t = nc_ty_error();
+    } else {
+        /* The operand is type-checked but never evaluated. */
+        nc_check_value(sm, &e->u.size.expr, NULL);
+        nc_default_untyped(sm, &e->u.size.expr);
+        t = e->u.size.expr->type;
+    }
+    if (nc_ty_is_error(t)) return fail(e);
+    e->cval = nc_cv_int(false, is_size ? nc_ty_size(t) : nc_ty_align(t));
+    return set_type(e, nc_ty_prim(NC_PRIM_USIZE));
+}
+
+static const nc_type *check_offsetof(nc_sema *sm, nc_expr *e)
+{
+    bool c;
+    const nc_type *t = nc_sema_value_type(sm, e->u.offsetof_.type, &c, false, "the operand of 'offsetof'");
+    if (nc_ty_is_error(t) || !e->u.offsetof_.field) return fail(e);
+    if (!nc_ty_is_struct(t) && !nc_ty_is_union(t)) {
+        nc_diag_error(NC_DIAG(sm), e->span, "E4075", "'offsetof' needs a struct or union type, found '%s'", nc_type_name(t));
+        return fail(e);
+    }
+    for (uint32_t i = 0; i < t->agg->nfields; i++)
+        if (t->agg->fields[i].name == e->u.offsetof_.field) {
+            e->cval = nc_cv_int(false, t->agg->fields[i].offset);
+            return set_type(e, nc_ty_prim(NC_PRIM_USIZE));
+        }
+    nc_diag_error(NC_DIAG(sm), e->span, "E4084", "%s '%s' has no field named '%s'", agg_kind(t), nc_type_name(t),
+                  nc_sema_sym(sm, e->u.offsetof_.field));
+    return fail(e);
+}
+
+/* ---- initialiser lists and struct literals (D-043) ------------------------------------------- */
+
+/* Can a member of type t be left out of an initialiser list? It is then
+ * zero-initialised, so zero must be a valid value of t. */
+static bool zeroable(const nc_type *t)
+{
+    switch (t->kind) {
+    case NC_TY_PRIM:
+    case NC_TY_PTR:
+    case NC_TY_UNION: return true;
+    case NC_TY_ARRAY: return zeroable(t->elem);
+    case NC_TY_STRUCT:
+        for (uint32_t i = 0; i < t->agg->nfields; i++)
+            if (!zeroable(t->agg->fields[i].type)) return false;
+        return true;
+    case NC_TY_ENUM:
+        for (uint32_t i = 0; i < t->en->nitems; i++)
+            if (t->en->items[i].value.mag == 0) return true;
+        return false;
+    default: return false;
+    }
+}
+
+static nc_expr *new_aggregate(nc_sema *sm, const nc_type *t, uint32_t n, nc_span span)
+{
+    nc_expr *a = nc_arena_alloc(&sm->s->arena, sizeof *a);
+    a->kind = NC_E_AGGREGATE;
+    a->span = span;
+    a->type = t;
+    a->u.agg.nelems = n;
+    a->u.agg.elems = n ? nc_arena_alloc(&sm->s->arena, n * sizeof *a->u.agg.elems) : NULL;
+    return a;
+}
+
+static nc_expr *check_list(nc_sema *sm, nc_init *in, const nc_type *t, const char *what);
+
+/* One member's initialiser: an expression or a nested list. */
+static nc_expr *check_member_init(nc_sema *sm, nc_init *v, const nc_type *t, const char *what)
+{
+    if (v->kind == NC_INIT_LIST) return check_list(sm, v, t, what);
+    if (v->kind == NC_INIT_UNINIT) {
+        nc_diag_error(NC_DIAG(sm), v->span, "E9001", "`uninit` is not implemented in this version (Phase 4)");
+        return NULL;
+    }
+    nc_check_value(sm, &v->expr, t);
+    if (!nc_coerce(sm, &v->expr, t, what) || nc_ty_is_error(v->expr->type)) return NULL;
+    return v->expr;
+}
+
+static nc_expr *check_array_list(nc_sema *sm, nc_init *in, const nc_type *t, const char *what)
+{
+    if (in->nitems) {
+        if (t->len > NC_MAX_LIST_ELEMS - sm->list_elems) {
+            nc_diag_error(NC_DIAG(sm), in->span, "E9005",
+                          "initialiser lists for arrays in this module exceed the implementation limit of %llu elements",
+                          (unsigned long long)NC_MAX_LIST_ELEMS);
+            nc_diag_help(NC_DIAG(sm), "initialise large arrays with `{}` and assign the elements");
+            sm->list_elems = NC_MAX_LIST_ELEMS;
+            return NULL;
+        }
+        sm->list_elems += t->len;
+    }
+    nc_expr *agg = new_aggregate(sm, t, in->nitems ? (uint32_t)t->len : 0, in->span);
+    const nc_type *usize = nc_ty_prim(NC_PRIM_USIZE);
+    uint64_t cursor = 0;
+    bool ok = true;
+    for (uint32_t i = 0; i < in->nitems; i++) {
+        nc_init_item *it = &in->items[i];
+        if (it->field) {
+            nc_diag_error(NC_DIAG(sm), it->span, "E4087", "a field designator cannot initialise an element of '%s'",
+                          nc_type_name(t));
+            ok = false;
+            continue;
+        }
+        if (it->index) {
+            nc_check_value(sm, &it->index, usize);
+            if (!nc_coerce(sm, &it->index, usize, "an element designator") || nc_ty_is_error(it->index->type)) {
+                ok = false;
+                continue;
+            }
+            if (it->index->cval.kind != NC_CV_INT) {
+                nc_diag_error(NC_DIAG(sm), it->index->span, "E4082", "an element designator must be a constant expression");
+                ok = false;
+                continue;
+            }
+            if (it->index->cval.mag >= t->len) {
+                nc_diag_error(NC_DIAG(sm), it->index->span, "E5040", "index %llu is out of bounds for an array of length %llu",
+                              (unsigned long long)it->index->cval.mag, (unsigned long long)t->len);
+                ok = false;
+                continue;
+            }
+            cursor = it->index->cval.mag;
+        }
+        if (cursor >= t->len) {
+            nc_diag_error(NC_DIAG(sm), it->span, "E4087", "too many elements in %s: '%s' has %llu", what, nc_type_name(t),
+                          (unsigned long long)t->len);
+            return NULL;
+        }
+        if (agg->u.agg.elems[cursor]) {
+            nc_diag_error(NC_DIAG(sm), it->span, "E4085", "element %llu is initialised more than once",
+                          (unsigned long long)cursor);
+            ok = false;
+        }
+        nc_expr *v = check_member_init(sm, it->value, t->elem, what);
+        if (!v) ok = false;
+        agg->u.agg.elems[cursor++] = v;
+    }
+    if (!ok) return NULL;
+    if (!zeroable(t->elem)) {
+        for (uint64_t k = 0; k < t->len; k++)
+            if (!in->nitems || !agg->u.agg.elems[k]) {
+                nc_diag_error(NC_DIAG(sm), in->span, "E4081", "element %llu of '%s' is not initialised", (unsigned long long)k,
+                              nc_type_name(t));
+                nc_diag_help(NC_DIAG(sm), "elements of type '%s' cannot be zero-initialised; give every element a value",
+                             nc_type_name(t->elem));
+                return NULL;
+            }
+    }
+    return agg;
+}
+
+static nc_expr *check_struct_list(nc_sema *sm, nc_init *in, const nc_type *t, const char *what)
+{
+    nc_aggregate *a = t->agg;
+    nc_expr *agg = new_aggregate(sm, t, a->nfields, in->span);
+    bool *set = nc_arena_alloc(&sm->s->arena, (a->nfields ? a->nfields : 1) * sizeof *set);
+    uint32_t cursor = 0;
+    bool ok = true;
+    for (uint32_t i = 0; i < in->nitems; i++) {
+        nc_init_item *it = &in->items[i];
+        if (it->index) {
+            nc_diag_error(NC_DIAG(sm), it->span, "E4087", "an element designator cannot initialise a field of '%s'",
+                          nc_type_name(t));
+            ok = false;
+            continue;
+        }
+        if (it->field) {
+            uint32_t f = 0;
+            while (f < a->nfields && a->fields[f].name != it->field) f++;
+            if (f == a->nfields) {
+                nc_diag_error(NC_DIAG(sm), it->span, "E4084", "struct '%s' has no field named '%s'", nc_type_name(t),
+                              nc_sema_sym(sm, it->field));
+                ok = false;
+                continue;
+            }
+            cursor = f;
+        }
+        if (cursor >= a->nfields) {
+            nc_diag_error(NC_DIAG(sm), it->span, "E4087", "too many values in %s: '%s' has %u field%s", what,
+                          nc_type_name(t), a->nfields, a->nfields == 1 ? "" : "s");
+            return NULL;
+        }
+        if (set[cursor]) {
+            nc_diag_error(NC_DIAG(sm), it->span, "E4085", "field '%s' is initialised more than once",
+                          nc_sema_sym(sm, a->fields[cursor].name));
+            ok = false;
+        }
+        set[cursor] = true;
+        char fwhat[128];
+        snprintf(fwhat, sizeof fwhat, "field '%s' of '%s'", nc_sema_sym(sm, a->fields[cursor].name), nc_type_name(t));
+        nc_expr *v = check_member_init(sm, it->value, a->fields[cursor].type, fwhat);
+        if (!v) ok = false;
+        agg->u.agg.elems[cursor++] = v;
+    }
+    if (!ok) return NULL;
+    for (uint32_t f = 0; f < a->nfields; f++) {
+        if (set[f] || zeroable(a->fields[f].type)) continue;
+        nc_diag_error(NC_DIAG(sm), in->span, "E4081", "field '%s' of '%s' is not initialised", nc_sema_sym(sm, a->fields[f].name),
+                      nc_type_name(t));
+        nc_diag_help(NC_DIAG(sm), "a field of type '%s' cannot be zero-initialised; give it a value",
+                     nc_type_name(a->fields[f].type));
+        return NULL;
+    }
+    return agg;
+}
+
+static nc_expr *check_union_list(nc_sema *sm, nc_init *in, const nc_type *t, const char *what)
+{
+    nc_aggregate *a = t->agg;
+    if (in->nitems == 0) return new_aggregate(sm, t, 0, in->span);
+    if (in->nitems > 1) {
+        nc_diag_error(NC_DIAG(sm), in->items[1].span, "E4087", "an initialiser for union '%s' sets exactly one field",
+                      nc_type_name(t));
+        return NULL;
+    }
+    nc_init_item *it = &in->items[0];
+    uint32_t f = 0;
+    if (it->index) {
+        nc_diag_error(NC_DIAG(sm), it->span, "E4087", "an element designator cannot initialise a field of '%s'", nc_type_name(t));
+        return NULL;
+    }
+    if (it->field) {
+        while (f < a->nfields && a->fields[f].name != it->field) f++;
+        if (f == a->nfields) {
+            nc_diag_error(NC_DIAG(sm), it->span, "E4084", "union '%s' has no field named '%s'", nc_type_name(t),
+                          nc_sema_sym(sm, it->field));
+            return NULL;
+        }
+    }
+    (void)what;
+    char fwhat[128];
+    snprintf(fwhat, sizeof fwhat, "field '%s' of '%s'", nc_sema_sym(sm, a->fields[f].name), nc_type_name(t));
+    nc_expr *v = check_member_init(sm, it->value, a->fields[f].type, fwhat);
+    if (!v) return NULL;
+    nc_expr *agg = new_aggregate(sm, t, 1, in->span);
+    agg->u.agg.elems[0] = v;
+    agg->u.agg.union_field = f;
+    return agg;
+}
+
+static nc_expr *check_list(nc_sema *sm, nc_init *in, const nc_type *t, const char *what)
+{
+    if (nc_ty_is_error(t)) return NULL;
+    if (nc_ty_is_array(t)) return check_array_list(sm, in, t, what);
+    if (nc_ty_is_struct(t)) return check_struct_list(sm, in, t, what);
+    if (nc_ty_is_union(t)) return check_union_list(sm, in, t, what);
+    nc_diag_error(NC_DIAG(sm), in->span, "E4087", "an initialiser list cannot initialise a value of type '%s' (%s)",
+                  nc_type_name(t), what);
+    nc_diag_help(NC_DIAG(sm), "braces initialise arrays, structs and unions; write the value without braces");
+    return NULL;
+}
+
+bool nc_sema_check_init(nc_sema *sm, nc_init *in, const nc_type *t, const char *what)
+{
+    if (in->kind == NC_INIT_EXPR) {
+        nc_check_value(sm, &in->expr, t);
+        return nc_coerce(sm, &in->expr, t, what) && !nc_ty_is_error(in->expr->type);
+    }
+    if (in->kind == NC_INIT_UNINIT) {
+        nc_diag_error(NC_DIAG(sm), in->span, "E9001", "`uninit` is not implemented in this version (Phase 4)");
+        return false;
+    }
+    nc_expr *agg = check_list(sm, in, t, what);
+    if (!agg) return false;
+    in->kind = NC_INIT_EXPR;
+    in->expr = agg;
+    return true;
+}
+
+static const nc_type *check_struct_lit(nc_sema *sm, nc_expr **slot)
+{
+    nc_expr *e = *slot;
+    bool c;
+    const nc_type *t = nc_sema_value_type(sm, e->u.struct_lit.type, &c, false, "a struct literal");
+    if (nc_ty_is_error(t)) return fail(e);
+    if (!nc_ty_is_struct(t) && !nc_ty_is_union(t) && !nc_ty_is_array(t)) {
+        nc_diag_error(NC_DIAG(sm), e->span, "E4087", "'%s' cannot be written as a literal with braces", nc_type_name(t));
+        return fail(e);
+    }
+    nc_init in = {NC_INIT_LIST, e->span, NULL, e->u.struct_lit.items, e->u.struct_lit.nitems};
+    char what[96];
+    snprintf(what, sizeof what, "a literal of type '%s'", nc_type_name(t));
+    nc_expr *agg = check_list(sm, &in, t, what);
+    if (!agg) return fail(e);
+    *slot = agg;
+    return agg->type;
+}
+
+bool nc_is_constant_expr(const nc_expr *e)
+{
+    if (!e) return true; /* a zero-initialised member */
+    if (e->cval.kind != NC_CV_NONE) return true;
+    if (e->kind == NC_E_IMPLICIT) return nc_is_constant_expr(e->u.convert.operand);
+    if (e->kind != NC_E_AGGREGATE) return false;
+    for (uint32_t i = 0; i < e->u.agg.nelems; i++)
+        if (!nc_is_constant_expr(e->u.agg.elems[i])) return false;
+    return true;
 }
 
 /* ---- unary ----------------------------------------------------------------------------- */
@@ -512,7 +995,7 @@ static const nc_type *check_unary(nc_sema *sm, nc_expr *e, const nc_type *expect
     case NC_UN_TRY: return unsupported(sm, e, "`try` is", 6);
     case NC_UN_PREINC: case NC_UN_PREDEC: case NC_UN_POSTINC: case NC_UN_POSTDEC: {
         bool inc = op == NC_UN_PREINC || op == NC_UN_POSTINC;
-        const nc_type *t = check_place(sm, &e->u.unary.operand, inc ? "increment" : "decrement");
+        const nc_type *t = check_place(sm, &e->u.unary.operand, inc ? "increment" : "decrement", true);
         if (nc_ty_is_error(t)) return fail(e);
         if (!nc_ty_is_numeric(t)) {
             nc_diag_error(NC_DIAG(sm), e->span, "E4011", "operator '%s' cannot be applied to type '%s'",
@@ -616,7 +1099,7 @@ static const nc_type *check_assign(nc_sema *sm, nc_expr *e)
     nc_binop op = e->u.binary.op;
     const char *sp = nc_assignop_spelling(op);
     set_type(e, nc_ty_prim(NC_PRIM_VOID));
-    const nc_type *lt = check_place(sm, &e->u.binary.lhs, "assign to");
+    const nc_type *lt = check_place(sm, &e->u.binary.lhs, "assign to", op != NC_BIN_NONE);
     char what[96];
     if (e->u.binary.lhs->kind == NC_E_NAME)
         snprintf(what, sizeof what, "the assignment to '%s'", nc_sema_sym(sm, e->u.binary.lhs->u.name));
@@ -650,10 +1133,34 @@ static const nc_type *check_assign(nc_sema *sm, nc_expr *e)
 
 /* ---- calls and conversions ----------------------------------------------------------------- */
 
+static const nc_type *check_convert(nc_sema *sm, nc_expr *e);
+
 static const nc_type *check_call(nc_sema *sm, nc_expr *e)
 {
     nc_expr *callee = e->u.call.callee;
     nc_fn_info *fn = NULL;
+    if (name_as_type(sm, callee)) {
+        /* `Color(x)`, `Vec2(p)`: a conversion to a named type, which the
+         * parser cannot tell from a call. */
+        if (e->u.call.nargs != 1) {
+            nc_diag_error(NC_DIAG(sm), e->span, "E4002", "a conversion to '%s' takes exactly one value",
+                          nc_sema_sym(sm, callee->u.name));
+            for (uint32_t i = 0; i < e->u.call.nargs; i++) nc_check_value(sm, &e->u.call.args[i], NULL);
+            return fail(e);
+        }
+        nc_type_expr *te = nc_arena_alloc(&sm->s->arena, sizeof *te);
+        te->kind = NC_TE_PATH;
+        te->span = callee->span;
+        te->u.path.path.count = 1;
+        te->u.path.path.parts = nc_arena_alloc(&sm->s->arena, sizeof(nc_sym));
+        te->u.path.path.parts[0] = callee->u.name;
+        te->u.path.path.span = callee->span;
+        nc_expr *arg = e->u.call.args[0];
+        e->kind = NC_E_CONVERT;
+        e->u.convert.type = te;
+        e->u.convert.operand = arg;
+        return check_convert(sm, e);
+    }
     if (callee->kind == NC_E_NAME) {
         bool poisoned;
         nc_var *v = nc_scope_use(sm, callee->u.name, callee->span, &poisoned);
@@ -706,28 +1213,48 @@ static const nc_type *check_call(nc_sema *sm, nc_expr *e)
     return set_type(e, fn->ret);
 }
 
+static bool is_enumerator_value(const nc_type *et, nc_cval v)
+{
+    for (uint32_t i = 0; i < et->en->nitems; i++)
+        if (nc_cv_cmp(et->en->items[i].value, v) == 0) return true;
+    return false;
+}
+
 static const nc_type *check_convert(nc_sema *sm, nc_expr *e)
 {
     bool is_const_ty;
-    const nc_type *to = nc_sema_resolve_type(sm, e->u.convert.type, &is_const_ty);
+    const nc_type *to = nc_sema_value_type(sm, e->u.convert.type, &is_const_ty, true, "a conversion");
     const nc_type *from = nc_check_value(sm, &e->u.convert.operand, NULL);
     nc_expr *x = e->u.convert.operand;
     if (nc_ty_is_error(to) || nc_ty_is_error(from)) return fail(e);
     char buf[64];
-    if (nc_ty_is_void(to) || nc_ty_is_bool(to) || (nc_ty_is_bool(from) && !nc_ty_is_integer(to))) {
+    if (from == to) { /* identity: allowed for every type */
+        e->cval = x->cval;
+        return set_type(e, to);
+    }
+    bool to_enum = nc_ty_is_enum(to), from_enum = nc_ty_is_enum(from);
+    bool from_int = nc_ty_is_integer(from) || from->kind == NC_TY_UNTYPED_INT;
+    bool from_scalar = nc_ty_is_untyped(from) || nc_ty_is_numeric(from) || nc_ty_is_bool(from) || from_enum;
+    bool to_scalar = nc_ty_is_numeric(to) || to_enum;
+    if (!from_scalar || !to_scalar || (to_enum && !from_int) || (from_enum && !nc_ty_is_integer(to)) ||
+        (nc_ty_is_bool(from) && !nc_ty_is_integer(to))) {
         nc_diag_error(NC_DIAG(sm), e->span, "E4007", "cannot convert '%s' to '%s'", nc_type_name(from), nc_type_name(to));
         if (nc_ty_is_bool(to)) nc_diag_help(NC_DIAG(sm), "compare instead, e.g. `x != 0`");
+        else if (to_enum && from_enum) nc_diag_help(NC_DIAG(sm), "convert through the underlying integer type");
         return fail(e);
     }
     set_type(e, to);
     if (!is_const(x)) return to;
 
+    /* An enum converts like its underlying integer type, and the result must
+     * be one of its enumerators (NOVAC_TYPE_SYSTEM.md §5.2). */
+    const nc_type *target = to_enum ? to->en->underlying : to;
     nc_cval v = x->cval;
     if (v.kind == NC_CV_BOOL) {
         e->cval = nc_cv_int(false, v.b ? 1 : 0);
         return to;
     }
-    if (nc_ty_is_integer(to)) {
+    if (nc_ty_is_integer(target)) {
         if (v.kind == NC_CV_FLOAT) {
             double t = trunc(v.f);
             if (isnan(v.f) || fabs(t) >= 18446744073709551616.0) {
@@ -737,9 +1264,10 @@ static const nc_type *check_convert(nc_sema *sm, nc_expr *e)
             }
             v = nc_cv_int(t < 0, (uint64_t)fabs(t));
         }
-        if (!nc_cv_fits(v, to)) {
-            nc_diag_error(NC_DIAG(sm), e->span, "E4040", "conversion of %s to '%s' always panics (value out of range)",
-                          fmt_cval(v, buf, sizeof buf), nc_type_name(to));
+        if (!nc_cv_fits(v, target) || (to_enum && !is_enumerator_value(to, v))) {
+            nc_diag_error(NC_DIAG(sm), e->span, "E4040", "conversion of %s to '%s' always panics (%s)",
+                          fmt_cval(v, buf, sizeof buf), nc_type_name(to),
+                          to_enum && nc_cv_fits(v, target) ? "not a value of the enum" : "value out of range");
             return fail(e);
         }
         e->cval = v;
@@ -802,27 +1330,7 @@ static const nc_type *check_expr(nc_sema *sm, nc_expr **slot, const nc_type *exp
     case NC_E_BOOL:
         e->cval = nc_cv_bool(e->u.bool_lit);
         return set_type(e, nc_ty_prim(NC_PRIM_BOOL));
-    case NC_E_NAME: {
-        bool poisoned;
-        nc_var *v = nc_scope_use(sm, e->u.name, e->span, &poisoned);
-        if (poisoned) return fail(e);
-        if (v) {
-            e->binding_kind = NC_BIND_VAR;
-            e->binding = v;
-            return set_type(e, v->type);
-        }
-        nc_fn_info *fn = nc_sema_find_fn(sm, e->u.name);
-        if (fn) {
-            e->binding_kind = NC_BIND_FN;
-            e->binding = fn;
-            nc_diag_error(NC_DIAG(sm), e->span, "E9001",
-                          "functions used as values are not implemented in this version (Phase 4)");
-            nc_diag_help(NC_DIAG(sm), "to call '%s', write `%s(...)`", nc_sema_sym(sm, e->u.name), nc_sema_sym(sm, e->u.name));
-            return fail(e);
-        }
-        nc_diag_error(NC_DIAG(sm), e->span, "E3001", "use of undeclared name '%s'", nc_sema_sym(sm, e->u.name));
-        return fail(e);
-    }
+    case NC_E_NAME: return check_name(sm, e);
     case NC_E_UNARY: return check_unary(sm, e, expected);
     case NC_E_BINARY: return check_binary(sm, e, expected);
     case NC_E_ASSIGN: return check_assign(sm, e);
@@ -831,20 +1339,23 @@ static const nc_type *check_expr(nc_sema *sm, nc_expr **slot, const nc_type *exp
     case NC_E_CONVERT: return check_convert(sm, e);
     case NC_E_IMPLICIT: return e->type;
     case NC_E_ERROR: return fail(e);
-    case NC_E_CHAR: return unsupported(sm, e, "character literals are", 4);
+    case NC_E_CHAR:
+        e->cval = nc_cv_int(false, e->u.char_lit);
+        return set_type(e, nc_ty_prim(NC_PRIM_U8));
     case NC_E_STRING: return unsupported(sm, e, "string literals are", 6);
     case NC_E_CSTRING: return unsupported(sm, e, "C string literals are", 4);
     case NC_E_NULL: return unsupported(sm, e, "`null` (raw pointers) is", 4);
     case NC_E_NONE: return unsupported(sm, e, "`none` (optional types) is", 6);
     case NC_E_SOME: return unsupported(sm, e, "`some` (optional types) is", 6);
     case NC_E_SELF: return unsupported(sm, e, "`self` is", 5);
-    case NC_E_INDEX: return unsupported(sm, e, "indexing is", 4);
-    case NC_E_MEMBER: return unsupported(sm, e, "member access is", 4);
+    case NC_E_INDEX: return index_access(sm, e, nc_check_value(sm, &e->u.index.base, NULL));
+    case NC_E_MEMBER: return check_member(sm, e);
     case NC_E_ARROW: return unsupported(sm, e, "member access through pointers is", 4);
-    case NC_E_STRUCT_LIT: return unsupported(sm, e, "struct literals are", 4);
-    case NC_E_SIZEOF: return unsupported(sm, e, "`sizeof` is", 4);
-    case NC_E_ALIGNOF: return unsupported(sm, e, "`alignof` is", 4);
-    case NC_E_OFFSETOF: return unsupported(sm, e, "`offsetof` is", 4);
+    case NC_E_STRUCT_LIT: return check_struct_lit(sm, slot);
+    case NC_E_SIZEOF:
+    case NC_E_ALIGNOF: return check_size(sm, e);
+    case NC_E_OFFSETOF: return check_offsetof(sm, e);
+    case NC_E_AGGREGATE: return e->type;
     case NC_E_GENERIC: return unsupported(sm, e, "explicit generic arguments are", 6);
     case NC_E_IS: return unsupported(sm, e, "`is` patterns are", 6);
     }

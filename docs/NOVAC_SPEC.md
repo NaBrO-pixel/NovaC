@@ -418,11 +418,14 @@ here:
 | E3001 | use of an undeclared name |
 | E3002 | redefinition of a name in the same scope |
 | E3003 | a variable used in its own initialiser |
+| E3005 | a type alias or constant defined in terms of itself |
+| E3006 | a name used as a type does not name a type |
 | E3011 | C type name (`char`, `long`, `short`, `unsigned`, …) used (D-031) |
 | E3020 | user declaration of a reserved `__` identifier |
 | E3030 | imported name collides with a declaration |
 | E3031 | import cycle |
 | E3040 | unknown attribute |
+| E3041 | attribute not applicable to this declaration, or malformed arguments |
 | E4060 | missing return value on some path |
 | E4061 | `@noreturn` function can return |
 | E4070 | duplicate `case` value |

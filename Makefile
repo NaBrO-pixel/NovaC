@@ -91,7 +91,7 @@ check-docs:
 
 # ---- fuzzing (NOVAC_ROADMAP.md step 2.8) ----
 FUZZ_BUILD := build/fuzz
-FUZZ_CFLAGS := -std=c11 $(WARN) -Isrc -isystem $(LLVM_INCLUDE) -O1 -g -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=all
+FUZZ_CFLAGS := -std=c11 $(WARN) -Isrc -isystem $(LLVM_INCLUDE) -MMD -MP -O1 -g -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=all
 FUZZ_LIB_OBJ := $(LIB_SRC:%.c=$(FUZZ_BUILD)/%.o)
 FUZZ_SECONDS ?= 60
 
@@ -109,6 +109,8 @@ fuzz-run: fuzz
 	cp tests/*/*.nc $(FUZZ_BUILD)/corpus/ 2>/dev/null || true
 	$(FUZZ_BUILD)/fuzz_frontend -max_total_time=$(FUZZ_SECONDS) -max_len=4096 \
 	    -dict=tests/fuzz/novac.dict -artifact_prefix=$(FUZZ_BUILD)/ $(FUZZ_BUILD)/corpus
+
+-include $(wildcard $(FUZZ_BUILD)/*/*.d $(FUZZ_BUILD)/*/*/*.d)
 
 clean:
 	rm -rf build

@@ -169,6 +169,130 @@ static nc_decl *parse_function(nc_parser *p, nc_decl *d)
     return d;
 }
 
+/* struct / union Name [<generics>] { fields } | struct Name; */
+static void parse_aggregate(nc_parser *p, nc_decl *d, bool is_union)
+{
+    d->kind = is_union ? NC_D_UNION : NC_D_STRUCT;
+    nc_p_advance(p); /* struct / union */
+    if (!nc_p_at(p, NC_T_IDENT)) {
+        nc_p_expected(p, is_union ? "a union name" : "a struct name");
+        return;
+    }
+    const nc_token *name = nc_p_advance(p);
+    d->u.agg.name = name->v.sym;
+    d->u.agg.name_span = name->span;
+    if (nc_p_at(p, NC_T_LT)) {
+        nc_decl tmp = {0};
+        parse_generic_params(p, &tmp);
+        d->u.agg.ngeneric = tmp.u.fn.ngeneric;
+        d->u.agg.generic_span = tmp.u.fn.generic_span;
+    }
+    if (!is_union && nc_p_accept(p, NC_T_SEMI)) {
+        d->u.agg.opaque = true;
+        return;
+    }
+    if (!nc_p_expect(p, NC_T_LBRACE, "'{' to begin the fields")) return;
+    NC_VEC(nc_field_decl) fields = {0};
+    while (!nc_p_at(p, NC_T_RBRACE) && !nc_p_at(p, NC_T_EOF)) {
+        nc_field_decl f = {0};
+        attr_vec attrs = {0};
+        parse_attrs(p, &attrs);
+        store_attrs(p, &attrs, &f.attrs, &f.nattrs);
+        f.span = nc_p_cur_span(p);
+        f.is_public = nc_p_accept(p, NC_T_KW_PUBLIC);
+        f.type = nc_parse_type(p);
+        if (!nc_p_at(p, NC_T_IDENT)) {
+            nc_p_expected(p, "a field name");
+            break;
+        }
+        const nc_token *fn = nc_p_advance(p);
+        f.name = fn->v.sym;
+        f.span = fn->span;
+        if (nc_p_at(p, NC_T_LBRACKET)) {
+            uint32_t lo = nc_p_cur(p)->span.lo;
+            while (nc_p_at(p, NC_T_LBRACKET)) nc_p_skip_balanced(p);
+            uint32_t hi = nc_p_prev(p)->span.hi;
+            const char *src = nc_source_get(&p->s->sources, p->file)->data;
+            if (nc_p_recoverable(p, (nc_span){p->file, lo, hi}, "E2020",
+                                 "array dimensions are written on the type, not after the name"))
+                nc_diag_help(&p->s->diag, "write `T%.*s %s` (D-005)", (int)(hi - lo), src + lo,
+                             nc_sym_str(&p->s->strtab, f.name));
+        }
+        nc_vec_push(&fields, f);
+        if (!nc_p_expect(p, NC_T_SEMI, "';' after the field")) break;
+    }
+    nc_p_expect(p, NC_T_RBRACE, "'}' to close the fields");
+    nc_p_accept(p, NC_T_SEMI); /* C habit `struct S { ... };` */
+    d->u.agg.nfields = (uint32_t)fields.len;
+    d->u.agg.fields = fields.len ? nc_arena_memdup(&p->s->arena, fields.data, fields.len * sizeof *fields.data) : NULL;
+    nc_vec_free(&fields);
+}
+
+/* enum Name [: type] { A, B = expr, ... } */
+static void parse_enum(nc_parser *p, nc_decl *d)
+{
+    d->kind = NC_D_ENUM;
+    nc_p_advance(p);
+    if (!nc_p_at(p, NC_T_IDENT)) {
+        nc_p_expected(p, "an enum name");
+        return;
+    }
+    const nc_token *name = nc_p_advance(p);
+    d->u.en.name = name->v.sym;
+    d->u.en.name_span = name->span;
+    if (nc_p_accept(p, NC_T_COLON)) d->u.en.underlying = nc_parse_type(p);
+    if (!nc_p_expect(p, NC_T_LBRACE, "'{' to begin the enumerators")) return;
+    NC_VEC(nc_enumerator_decl) items = {0};
+    while (!nc_p_at(p, NC_T_RBRACE) && !nc_p_at(p, NC_T_EOF)) {
+        nc_enumerator_decl it = {0};
+        if (!nc_p_at(p, NC_T_IDENT)) {
+            nc_p_expected(p, "an enumerator name");
+            break;
+        }
+        const nc_token *t = nc_p_advance(p);
+        it.name = t->v.sym;
+        it.span = t->span;
+        if (nc_p_accept(p, NC_T_ASSIGN)) it.value = nc_parse_expr(p);
+        nc_vec_push(&items, it);
+        if (!nc_p_accept(p, NC_T_COMMA)) break;
+    }
+    nc_p_expect(p, NC_T_RBRACE, "'}' to close the enumerators");
+    nc_p_accept(p, NC_T_SEMI);
+    d->u.en.nitems = (uint32_t)items.len;
+    d->u.en.items = items.len ? nc_arena_memdup(&p->s->arena, items.data, items.len * sizeof *items.data) : NULL;
+    nc_vec_free(&items);
+}
+
+/* typedef T Name;   static T name [= init];   constexpr T NAME = expr; */
+static void parse_var_like(nc_parser *p, nc_decl *d, nc_decl_kind kind)
+{
+    d->kind = kind;
+    nc_p_advance(p);
+    d->u.var.type = nc_parse_type(p);
+    if (!nc_p_at(p, NC_T_IDENT)) {
+        nc_p_expected(p, kind == NC_D_TYPEDEF ? "the name of the type alias" : "a name");
+        return;
+    }
+    const nc_token *name = nc_p_advance(p);
+    d->u.var.name = name->v.sym;
+    d->u.var.name_span = name->span;
+    if (kind != NC_D_TYPEDEF && nc_p_accept(p, NC_T_ASSIGN)) {
+        if (kind == NC_D_CONSTEXPR) {
+            nc_init *in = nc_p_alloc(p, sizeof *in);
+            in->kind = NC_INIT_EXPR;
+            in->expr = nc_parse_expr(p);
+            in->span = in->expr->span;
+            d->u.var.init = in;
+        } else {
+            d->u.var.init = nc_parse_initializer(p);
+        }
+    } else if (kind == NC_D_CONSTEXPR) {
+        nc_p_expected(p, "'=' and a value: a constexpr needs one");
+        return;
+    }
+    nc_p_expect(p, NC_T_SEMI, "';'");
+}
+
 static nc_decl *unsupported_decl(nc_parser *p, nc_decl *d, const char *what, int phase)
 {
     d->kind = NC_D_UNSUPPORTED;
@@ -187,12 +311,12 @@ static nc_decl *parse_top_decl(nc_parser *p, attr_vec *attrs)
     d->is_public = nc_p_accept(p, NC_T_KW_PUBLIC);
     const nc_token *t = nc_p_cur(p);
     switch (t->kind) {
-    case NC_T_KW_STRUCT: unsupported_decl(p, d, "struct", 4); break;
-    case NC_T_KW_UNION: unsupported_decl(p, d, "union", 4); break;
-    case NC_T_KW_ENUM: unsupported_decl(p, d, "enum", 4); break;
-    case NC_T_KW_TYPEDEF: unsupported_decl(p, d, "typedef", 4); break;
-    case NC_T_KW_STATIC: unsupported_decl(p, d, "static", 4); break;
-    case NC_T_KW_CONSTEXPR: unsupported_decl(p, d, "constexpr", 4); break;
+    case NC_T_KW_STRUCT: parse_aggregate(p, d, false); break;
+    case NC_T_KW_UNION: parse_aggregate(p, d, true); break;
+    case NC_T_KW_ENUM: parse_enum(p, d); break;
+    case NC_T_KW_TYPEDEF: parse_var_like(p, d, NC_D_TYPEDEF); break;
+    case NC_T_KW_STATIC: parse_var_like(p, d, NC_D_STATIC); break;
+    case NC_T_KW_CONSTEXPR: parse_var_like(p, d, NC_D_CONSTEXPR); break;
     case NC_T_KW_IMPL: unsupported_decl(p, d, "impl", 5); break;
     case NC_T_KW_INTERFACE: unsupported_decl(p, d, "interface", 6); break;
     case NC_T_KW_IMPORT: unsupported_decl(p, d, "import", 6); break;
@@ -262,7 +386,7 @@ nc_module_ast *nc_parse(nc_session *s, uint32_t file, nc_token_list toks)
         nc_decl *d = parse_top_decl(&p, &attrs);
         nc_vec_push(&decls, d);
         if (p.panic) {
-            if (d->kind == NC_D_FUNCTION) nc_p_skip_decl(&p);
+            if (d->kind != NC_D_UNSUPPORTED) nc_p_skip_decl(&p);
             p.panic = false;
         }
         if (p.pos == before) nc_p_advance(&p);

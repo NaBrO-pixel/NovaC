@@ -45,6 +45,13 @@ typedef struct cg {
     LLVMValueRef fv;
     LLVMValueRef *allocas;
     LLVMBasicBlockRef *bbs;
+    LLVMBuilderRef entry_b; /* adds allocas to the entry block, so loops do not grow the stack */
+    /* aggregates and statics */
+    LLVMTargetDataRef td;
+    const nc_aggregate **agg_keys;
+    LLVMTypeRef *agg_types;
+    uint32_t naggs, cap_aggs;
+    LLVMValueRef *static_vals;
 } cg;
 
 void nc_codegen_init(void)
@@ -68,8 +75,54 @@ void nc_codegen_llvm_version(char *buf, size_t n)
 
 /* ---- types and names --------------------------------------------------------------- */
 
+static LLVMTypeRef llvm_type(cg *g, const nc_type *t);
+
+/* A struct's or union's named LLVM type. A union is `{ [size/align x iA] }`
+ * with A its alignment in bits, so LLVM gives it the computed size and
+ * alignment; fields are accessed through the union's address. The layout
+ * LLVM computes must equal the one NovaC computed (NOVAC_ABI.md §4). */
+static LLVMTypeRef aggregate_type(cg *g, const nc_aggregate *agg)
+{
+    for (uint32_t i = 0; i < g->naggs; i++)
+        if (g->agg_keys[i] == agg) return g->agg_types[i];
+    char name[300];
+    snprintf(name, sizeof name, "%s.%s", agg->is_union ? "union" : "struct", nc_sym_str(&g->s->strtab, agg->name));
+    LLVMTypeRef ty = LLVMStructCreateNamed(g->ctx, name);
+    if (g->naggs == g->cap_aggs) {
+        g->cap_aggs = g->cap_aggs ? g->cap_aggs * 2 : 8;
+        g->agg_keys = nc_xrealloc(g->agg_keys, g->cap_aggs * sizeof *g->agg_keys);
+        g->agg_types = nc_xrealloc(g->agg_types, g->cap_aggs * sizeof *g->agg_types);
+    }
+    g->agg_keys[g->naggs] = agg;
+    g->agg_types[g->naggs++] = ty;
+    if (agg->is_union) {
+        LLVMTypeRef unit = LLVMIntTypeInContext(g->ctx, (unsigned)(agg->align * 8));
+        LLVMTypeRef body = LLVMArrayType2(unit, agg->size / agg->align);
+        LLVMStructSetBody(ty, &body, 1, 0);
+    } else {
+        LLVMTypeRef *fields = nc_xcalloc(agg->nfields ? agg->nfields : 1, sizeof *fields);
+        for (uint32_t i = 0; i < agg->nfields; i++) fields[i] = llvm_type(g, agg->fields[i].type);
+        LLVMStructSetBody(ty, fields, agg->nfields, agg->packed);
+        free(fields);
+    }
+    bool ok = LLVMABISizeOfType(g->td, ty) == agg->size && LLVMABIAlignmentOfType(g->td, ty) == agg->align;
+    for (uint32_t i = 0; ok && !agg->is_union && i < agg->nfields; i++)
+        ok = LLVMOffsetOfElement(g->td, ty, i) == agg->fields[i].offset;
+    if (!ok) nc_ice("codegen", "the LLVM layout of an aggregate differs from the computed layout");
+    return ty;
+}
+
 static LLVMTypeRef llvm_type(cg *g, const nc_type *t)
 {
+    switch (t->kind) {
+    case NC_TY_ARRAY: return LLVMArrayType2(llvm_type(g, t->elem), t->len);
+    case NC_TY_STRUCT:
+    case NC_TY_UNION: return aggregate_type(g, t->agg);
+    case NC_TY_ENUM: return llvm_type(g, t->en->underlying);
+    case NC_TY_PTR: return g->ptr_ty;
+    case NC_TY_PRIM: break;
+    default: nc_ice("codegen", "unexpected type");
+    }
     switch (t->prim) {
     case NC_PRIM_I8: case NC_PRIM_U8: return LLVMInt8TypeInContext(g->ctx);
     case NC_PRIM_I16: case NC_PRIM_U16: return LLVMInt16TypeInContext(g->ctx);
@@ -256,10 +309,114 @@ static LLVMValueRef const_value(cg *g, nc_cval v, const nc_type *t)
     return LLVMConstInt(ty, bits, 0);
 }
 
+/* The address of a place (NIR projections become GEPs). Sets *misaligned
+ * if the place lies inside a @packed struct, where its natural alignment
+ * cannot be assumed. */
+static LLVMValueRef place_addr(cg *g, const nc_place *p, bool *misaligned)
+{
+    *misaligned = false;
+    LLVMValueRef addr = p->base == NC_PLACE_LOCAL ? g->allocas[p->id] : g->static_vals[p->id];
+    const nc_type *t = nc_nir_place_base_type(g->m, g->f, p);
+    for (uint32_t i = 0; i < p->nprojs; i++) {
+        const nc_proj *pr = &p->projs[i];
+        if (pr->kind == NC_PROJ_FIELD) {
+            if (nc_ty_is_struct(t) && t->agg->packed) *misaligned = true;
+            if (nc_ty_is_struct(t)) addr = LLVMBuildStructGEP2(g->b, llvm_type(g, t), addr, pr->field, "");
+            /* a union's fields all start at its address */
+        } else {
+            LLVMValueRef idx[2] = {LLVMConstInt(g->i64_ty, 0, 0),
+                                   pr->index_is_const ? LLVMConstInt(g->i64_ty, pr->index, 0)
+                                                      : LLVMBuildLoad2(g->b, g->i64_ty, g->allocas[pr->index_local], "")};
+            /* inbounds: the index was checked against the length */
+            addr = LLVMBuildInBoundsGEP2(g->b, llvm_type(g, t), addr, idx, 2, "");
+        }
+        t = pr->type;
+    }
+    return addr;
+}
+
 static LLVMValueRef operand(cg *g, const nc_operand *o)
 {
-    if (o->kind == NC_OP_CONST) return const_value(g, o->cval, o->type);
-    return LLVMBuildLoad2(g->b, llvm_type(g, o->type), g->allocas[o->local], "");
+    switch (o->kind) {
+    case NC_OP_CONST: return const_value(g, o->cval, o->type);
+    case NC_OP_ZERO: return LLVMConstNull(llvm_type(g, o->type));
+    case NC_OP_COPY: break;
+    }
+    bool misaligned;
+    LLVMValueRef addr = place_addr(g, &o->place, &misaligned);
+    LLVMValueRef v = LLVMBuildLoad2(g->b, llvm_type(g, o->type), addr, "");
+    if (misaligned) LLVMSetAlignment(v, 1);
+    return v;
+}
+
+/* NovaC's internal calling convention passes struct, union and array
+ * values indirectly (NOVAC_ABI.md §6): an argument is the address of the
+ * value, which the callee copies on entry, and a result is written through
+ * a hidden first parameter. First-class aggregate arguments would make
+ * LLVM expand large arrays element by element. */
+static bool indirect(const nc_type *t)
+{
+    return nc_ty_is_aggregate(t);
+}
+
+/* The address of operand `o` (an aggregate): its place, or a temporary. */
+static LLVMValueRef operand_addr(cg *g, const nc_operand *o);
+
+/* Store operand `o` of type t at addr. Aggregates are copied with memcpy
+ * and zeroed with memset: LLVM expands first-class aggregate loads and
+ * stores element by element, which is slow for large arrays. */
+static void store_operand(cg *g, const nc_operand *o, LLVMValueRef addr, bool misaligned, const nc_type *t)
+{
+    if (nc_ty_is_aggregate(t) && o->kind != NC_OP_CONST) {
+        unsigned align = misaligned ? 1 : (unsigned)nc_ty_align(t);
+        LLVMValueRef size = LLVMConstInt(g->i64_ty, nc_ty_size(t), 0);
+        if (o->kind == NC_OP_ZERO) {
+            LLVMBuildMemSet(g->b, addr, LLVMConstInt(LLVMInt8TypeInContext(g->ctx), 0, 0), size, align);
+        } else {
+            /* Places of one type are equal or disjoint, as llvm.memcpy requires. */
+            bool src_misaligned;
+            LLVMValueRef src = place_addr(g, &o->place, &src_misaligned);
+            LLVMBuildMemCpy(g->b, addr, align, src, src_misaligned ? 1 : (unsigned)nc_ty_align(t), size);
+        }
+        return;
+    }
+    LLVMValueRef st = LLVMBuildStore(g->b, operand(g, o), addr);
+    if (misaligned) LLVMSetAlignment(st, 1);
+}
+
+static LLVMValueRef operand_addr(cg *g, const nc_operand *o)
+{
+    if (o->kind == NC_OP_COPY) {
+        bool misaligned;
+        return place_addr(g, &o->place, &misaligned);
+    }
+    LLVMValueRef tmp = LLVMBuildAlloca(g->entry_b, llvm_type(g, o->type), "");
+    store_operand(g, o, tmp, false, o->type);
+    return tmp;
+}
+
+/* An aggregate rvalue: zero the destination, then store each member that
+ * is not zero. */
+static void store_aggregate(cg *g, const nc_rvalue *rv, LLVMValueRef addr, bool misaligned, const nc_type *t)
+{
+    nc_operand zero = {0};
+    zero.kind = NC_OP_ZERO;
+    zero.type = t;
+    store_operand(g, &zero, addr, misaligned, t);
+    for (uint32_t i = 0; i < rv->nelems; i++) {
+        const nc_operand *m = &rv->elems[i];
+        if (m->kind == NC_OP_ZERO) continue;
+        LLVMValueRef ma = addr;
+        bool mm = misaligned;
+        if (nc_ty_is_array(t)) {
+            LLVMValueRef idx[2] = {LLVMConstInt(g->i64_ty, 0, 0), LLVMConstInt(g->i64_ty, i, 0)};
+            ma = LLVMBuildInBoundsGEP2(g->b, llvm_type(g, t), addr, idx, 2, "");
+        } else if (nc_ty_is_struct(t)) {
+            ma = LLVMBuildStructGEP2(g->b, llvm_type(g, t), addr, i, "");
+            mm = mm || t->agg->packed;
+        }
+        store_operand(g, m, ma, mm, m->type);
+    }
 }
 
 /* -Ofast (D-040): flags that may change floating-point results but never
@@ -337,6 +494,7 @@ static LLVMValueRef cast(cg *g, nc_cast_kind k, const nc_operand *oa, const nc_t
         if (from == to) return a;
         return to->prim == NC_PRIM_F64 ? LLVMBuildFPExt(g->b, a, ty, "") : LLVMBuildFPTrunc(g->b, a, ty, "");
     case NC_CAST_BOOL_TO_INT: return LLVMBuildZExt(g->b, a, ty, "");
+    case NC_CAST_NOP: return a;
     }
     nc_ice("codegen", "invalid cast");
 }
@@ -355,7 +513,7 @@ static LLVMValueRef overflow_intrinsic(cg *g, nc_nir_binop op, const nc_type *t,
 static void gen_stmt(cg *g, const nc_nir_stmt *st)
 {
     set_loc(g, st->span);
-    const nc_type *dt = g->f->locals[st->dest].type;
+    const nc_type *dt = st->dest.type;
     LLVMValueRef v;
     if (st->kind == NC_ST_CHECKED) {
         LLVMTypeRef fty;
@@ -366,7 +524,15 @@ static void gen_stmt(cg *g, const nc_nir_stmt *st)
         v = LLVMBuildExtractValue(g->b, pair, 0, "");
     } else {
         switch (st->rv.kind) {
-        case NC_RV_USE: v = operand(g, &st->rv.a); break;
+        case NC_RV_USE:
+            if (nc_ty_is_aggregate(dt)) {
+                bool misaligned;
+                LLVMValueRef addr = place_addr(g, &st->dest, &misaligned);
+                store_operand(g, &st->rv.a, addr, misaligned, dt);
+                return;
+            }
+            v = operand(g, &st->rv.a);
+            break;
         case NC_RV_BINARY: v = binary(g, st->rv.binop, &st->rv.a, &st->rv.b); break;
         case NC_RV_UNARY: {
             LLVMValueRef a = operand(g, &st->rv.a);
@@ -375,10 +541,18 @@ static void gen_stmt(cg *g, const nc_nir_stmt *st)
             break;
         }
         case NC_RV_CAST: v = cast(g, st->rv.cast, &st->rv.a, dt); break;
+        case NC_RV_AGGREGATE: {
+            bool misaligned;
+            LLVMValueRef addr = place_addr(g, &st->dest, &misaligned);
+            store_aggregate(g, &st->rv, addr, misaligned, dt);
+            return;
+        }
         default: nc_ice("codegen", "invalid rvalue");
         }
     }
-    LLVMBuildStore(g->b, v, g->allocas[st->dest]);
+    bool misaligned;
+    LLVMValueRef st_i = LLVMBuildStore(g->b, v, place_addr(g, &st->dest, &misaligned));
+    if (misaligned) LLVMSetAlignment(st_i, 1);
 }
 
 static void gen_term(cg *g, const nc_terminator *t)
@@ -389,18 +563,34 @@ static void gen_term(cg *g, const nc_terminator *t)
     case NC_TERM_GOTO: LLVMBuildBr(B, g->bbs[t->target]); break;
     case NC_TERM_BRANCH: LLVMBuildCondBr(B, operand(g, &t->cond), g->bbs[t->target], g->bbs[t->other]); break;
     case NC_TERM_RETURN:
-        if (t->has_value) LLVMBuildRet(B, operand(g, &t->value));
-        else LLVMBuildRetVoid(B);
+        if (t->has_value && indirect(t->value.type)) {
+            store_operand(g, &t->value, LLVMGetParam(g->fv, 0), false, t->value.type);
+            LLVMBuildRetVoid(B);
+        } else if (t->has_value) {
+            LLVMBuildRet(B, operand(g, &t->value));
+        } else {
+            LLVMBuildRetVoid(B);
+        }
         break;
     case NC_TERM_UNREACHABLE: LLVMBuildUnreachable(B); break;
+    case NC_TERM_SWITCH: {
+        LLVMValueRef sw = LLVMBuildSwitch(B, operand(g, &t->cond), g->bbs[t->other], t->ncases);
+        for (uint32_t c = 0; c < t->ncases; c++)
+            LLVMAddCase(sw, const_value(g, t->case_values[c], t->cond.type), g->bbs[t->case_targets[c]]);
+        break;
+    }
     case NC_TERM_CALL: {
         uint32_t idx = 0;
         while (idx < g->m->nfns && g->m->fns[idx] != t->callee) idx++;
-        LLVMValueRef *args = t->nargs ? nc_xcalloc(t->nargs, sizeof *args) : NULL;
-        for (uint32_t i = 0; i < t->nargs; i++) args[i] = operand(g, &t->args[i]);
-        LLVMValueRef r = LLVMBuildCall2(B, g->fn_tys[idx], g->fn_vals[idx], args, t->nargs, "");
+        bool sret = indirect(t->callee->ret);
+        uint32_t n = t->nargs + sret;
+        LLVMValueRef *args = nc_xcalloc(n ? n : 1, sizeof *args);
+        if (sret) args[0] = g->allocas[t->dest];
+        for (uint32_t i = 0; i < t->nargs; i++)
+            args[i + sret] = indirect(t->args[i].type) ? operand_addr(g, &t->args[i]) : operand(g, &t->args[i]);
+        LLVMValueRef r = LLVMBuildCall2(B, g->fn_tys[idx], g->fn_vals[idx], args, n, "");
         free(args);
-        if (t->dest != UINT32_MAX) LLVMBuildStore(B, r, g->allocas[t->dest]);
+        if (t->dest != UINT32_MAX && !sret) LLVMBuildStore(B, r, g->allocas[t->dest]);
         LLVMBuildBr(B, g->bbs[t->target]);
         break;
     }
@@ -453,8 +643,17 @@ static void gen_function(cg *g, uint32_t idx)
         else snprintf(name, sizeof name, "_%u", l);
         g->allocas[l] = LLVMBuildAlloca(g->b, llvm_type(g, f->locals[l].type), name);
     }
-    for (uint32_t p = 0; p < f->nparams; p++) LLVMBuildStore(g->b, LLVMGetParam(g->fv, p), g->allocas[p]);
-    LLVMBuildBr(g->b, g->bbs[0]);
+    bool sret = indirect(f->ret);
+    for (uint32_t p = 0; p < f->nparams; p++) {
+        const nc_type *pt = f->locals[p].type;
+        LLVMValueRef arg = LLVMGetParam(g->fv, p + sret);
+        if (indirect(pt))
+            LLVMBuildMemCpy(g->b, g->allocas[p], (unsigned)nc_ty_align(pt), arg, (unsigned)nc_ty_align(pt),
+                            LLVMConstInt(g->i64_ty, nc_ty_size(pt), 0));
+        else
+            LLVMBuildStore(g->b, arg, g->allocas[p]);
+    }
+    LLVMPositionBuilderBefore(g->entry_b, LLVMBuildBr(g->b, g->bbs[0]));
     for (uint32_t b = 0; b < f->nblocks; b++) {
         LLVMPositionBuilderAtEnd(g->b, g->bbs[b]);
         const nc_nir_block *blk = &f->blocks[b];
@@ -467,6 +666,100 @@ static void gen_function(cg *g, uint32_t idx)
     g->bbs = NULL;
 }
 
+/* ---- statics ------------------------------------------------------------------------- */
+
+static bool has_union(const nc_type *t)
+{
+    if (nc_ty_is_union(t)) return true;
+    if (nc_ty_is_array(t)) return has_union(t->elem);
+    if (nc_ty_is_struct(t))
+        for (uint32_t i = 0; i < t->agg->nfields; i++)
+            if (has_union(t->agg->fields[i].type)) return true;
+    return false;
+}
+
+/* The bytes of a constant (all version-1 targets are little-endian). */
+static void const_bytes(const nc_expr *e, const nc_type *t, uint8_t *buf)
+{
+    if (!e) return; /* zero */
+    if (e->cval.kind != NC_CV_NONE) {
+        uint64_t bits;
+        nc_cval v = e->cval;
+        if (nc_ty_is_float(t)) {
+            if (t->prim == NC_PRIM_F32) {
+                float f = (float)nc_cv_to_double(v);
+                uint32_t u;
+                memcpy(&u, &f, 4);
+                bits = u;
+            } else {
+                double d = nc_cv_to_double(v);
+                memcpy(&bits, &d, 8);
+            }
+        } else if (v.kind == NC_CV_BOOL) {
+            bits = v.b;
+        } else {
+            bits = v.neg ? (uint64_t)0 - v.mag : v.mag;
+        }
+        for (uint64_t i = 0; i < nc_ty_size(t); i++) buf[i] = (uint8_t)(bits >> (8 * i));
+        return;
+    }
+    if (e->kind == NC_E_IMPLICIT) {
+        const_bytes(e->u.convert.operand, t, buf);
+        return;
+    }
+    if (e->kind != NC_E_AGGREGATE) nc_ice("codegen", "static initialiser is not constant");
+    for (uint32_t i = 0; i < e->u.agg.nelems; i++) {
+        if (nc_ty_is_array(t)) const_bytes(e->u.agg.elems[i], t->elem, buf + i * nc_ty_size(t->elem));
+        else if (nc_ty_is_union(t)) const_bytes(e->u.agg.elems[i], t->agg->fields[e->u.agg.union_field].type, buf);
+        else const_bytes(e->u.agg.elems[i], t->agg->fields[i].type, buf + t->agg->fields[i].offset);
+    }
+}
+
+static LLVMValueRef const_init(cg *g, const nc_expr *e, const nc_type *t)
+{
+    LLVMTypeRef ty = llvm_type(g, t);
+    if (!e) return LLVMConstNull(ty);
+    if (e->cval.kind != NC_CV_NONE) return const_value(g, e->cval, t);
+    if (e->kind == NC_E_IMPLICIT) return const_init(g, e->u.convert.operand, t);
+    if (e->kind != NC_E_AGGREGATE) nc_ice("codegen", "static initialiser is not constant");
+    if (e->u.agg.nelems == 0) return LLVMConstNull(ty);
+    uint32_t n = e->u.agg.nelems;
+    LLVMValueRef *vals = nc_xcalloc(n, sizeof *vals);
+    for (uint32_t i = 0; i < n; i++)
+        vals[i] = const_init(g, e->u.agg.elems[i], nc_ty_is_array(t) ? t->elem : t->agg->fields[i].type);
+    LLVMValueRef c = nc_ty_is_array(t) ? LLVMConstArray2(llvm_type(g, t->elem), vals, n) : LLVMConstNamedStruct(ty, vals, n);
+    free(vals);
+    return c;
+}
+
+static void gen_statics(cg *g)
+{
+    g->static_vals = nc_xcalloc(g->m->nstatics ? g->m->nstatics : 1, sizeof *g->static_vals);
+    for (uint32_t i = 0; i < g->m->nstatics; i++) {
+        const nc_nir_static *st = &g->m->statics[i];
+        LLVMValueRef init;
+        if (has_union(st->type)) {
+            /* A union constant has no LLVM constant of the union's type;
+             * emit its bytes. Accesses load and store typed values. */
+            uint64_t size = nc_ty_size(st->type);
+            uint8_t *buf = nc_xcalloc(size ? size : 1, 1);
+            const_bytes(st->init, st->type, buf);
+            init = LLVMConstStringInContext(g->ctx, (const char *)buf, (unsigned)size, 1);
+            free(buf);
+        } else {
+            init = const_init(g, st->init, st->type);
+        }
+        char name[512];
+        mangle(g, st->name, name, sizeof name);
+        LLVMValueRef gv = LLVMAddGlobal(g->mod, LLVMTypeOf(init), name);
+        LLVMSetInitializer(gv, init);
+        LLVMSetGlobalConstant(gv, st->is_const);
+        LLVMSetLinkage(gv, st->is_public ? LLVMExternalLinkage : LLVMInternalLinkage);
+        LLVMSetAlignment(gv, (unsigned)nc_ty_align(st->type));
+        g->static_vals[i] = gv;
+    }
+}
+
 /* int main(int argc, char **argv, char **envp) { return <NovaC main>(); }
  * (NOVAC_ABI.md §7). */
 static bool gen_main_wrapper(cg *g)
@@ -474,7 +767,7 @@ static bool gen_main_wrapper(cg *g)
     for (uint32_t i = 0; i < g->m->nfns; i++) {
         const nc_nir_fn *f = g->m->fns[i];
         if (strcmp(nc_sym_str(&g->s->strtab, f->name), "main") != 0) continue;
-        if (f->nparams != 0 || f->ret->prim != NC_PRIM_I32) {
+        if (f->nparams != 0 || f->ret->kind != NC_TY_PRIM || f->ret->prim != NC_PRIM_I32) {
             nc_diag_error(&g->s->diag, f->span, "E8005", "`main` must be declared `i32 main()` (or `int main(void)`)");
             return false;
         }
@@ -536,6 +829,7 @@ bool nc_codegen(nc_session *s, const nc_nir_module *m, const nc_codegen_options 
     LLVMSetSourceFileName(g.mod, src, strlen(src));
     LLVMSetTarget(g.mod, o->target->triple);
     g.b = LLVMCreateBuilderInContext(g.ctx);
+    g.entry_b = LLVMCreateBuilderInContext(g.ctx);
     g.ptr_ty = LLVMPointerTypeInContext(g.ctx, 0);
     g.i32_ty = LLVMInt32TypeInContext(g.ctx);
     g.i64_ty = LLVMInt64TypeInContext(g.ctx);
@@ -550,6 +844,7 @@ bool nc_codegen(nc_session *s, const nc_nir_module *m, const nc_codegen_options 
     LLVMTargetDataRef td = LLVMCreateTargetDataLayout(tm);
     LLVMSetModuleDataLayout(g.mod, td);
     LLVMDisposeTargetData(td);
+    g.td = LLVMGetModuleDataLayout(g.mod);
     if (o->target->abi[0]) {
         LLVMAddModuleFlag(g.mod, LLVMModuleFlagBehaviorError, "target-abi", 10,
                           LLVMMDStringInContext2(g.ctx, o->target->abi, strlen(o->target->abi)));
@@ -557,13 +852,18 @@ bool nc_codegen(nc_session *s, const nc_nir_module *m, const nc_codegen_options 
     if (o->debug) init_debug(&g);
 
     declare_panic(&g);
+    gen_statics(&g);
     g.fn_vals = nc_xcalloc(m->nfns ? m->nfns : 1, sizeof *g.fn_vals);
     g.fn_tys = nc_xcalloc(m->nfns ? m->nfns : 1, sizeof *g.fn_tys);
     for (uint32_t i = 0; i < m->nfns; i++) {
         const nc_nir_fn *f = m->fns[i];
-        LLVMTypeRef *ps = nc_xcalloc(f->nparams ? f->nparams : 1, sizeof *ps);
-        for (uint32_t p = 0; p < f->nparams; p++) ps[p] = llvm_type(&g, f->locals[p].type);
-        g.fn_tys[i] = LLVMFunctionType(llvm_type(&g, f->ret), ps, f->nparams, 0);
+        bool sret = indirect(f->ret);
+        LLVMTypeRef *ps = nc_xcalloc(f->nparams + 1, sizeof *ps);
+        if (sret) ps[0] = g.ptr_ty;
+        for (uint32_t p = 0; p < f->nparams; p++)
+            ps[p + sret] = indirect(f->locals[p].type) ? g.ptr_ty : llvm_type(&g, f->locals[p].type);
+        g.fn_tys[i] = LLVMFunctionType(sret ? LLVMVoidTypeInContext(g.ctx) : llvm_type(&g, f->ret), ps,
+                                       f->nparams + sret, 0);
         free(ps);
         char name[512];
         mangle(&g, f->name, name, sizeof name);
@@ -628,7 +928,11 @@ done:
     if (g.di) LLVMDisposeDIBuilder(g.di);
     free(g.fn_vals);
     free(g.fn_tys);
+    free(g.static_vals);
+    free(g.agg_keys);
+    free(g.agg_types);
     LLVMDisposeBuilder(g.b);
+    LLVMDisposeBuilder(g.entry_b);
     LLVMDisposeModule(g.mod);
     if (tm) LLVMDisposeTargetMachine(tm);
     LLVMContextDispose(g.ctx);
