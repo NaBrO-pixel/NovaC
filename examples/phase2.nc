@@ -1,6 +1,6 @@
-// A program in the Phase 2 subset of NovaC. It can be checked with
-//   ncc --check examples/phase2.nc
-// but not yet compiled: code generation arrives in Phase 3.
+// A program in the Phase 2 subset of NovaC. Build and run it with
+//   ncc -O2 examples/phase2.nc -o phase2 && ./phase2
+// It exits with status 0 when every computed value is as expected.
 module examples.phase2;
 
 u64 factorial(u64 n) {

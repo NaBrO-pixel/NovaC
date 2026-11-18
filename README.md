@@ -6,12 +6,14 @@ with compile-time ownership and borrow checking, LLVM-based native code
 generation, C ABI interoperability, and freestanding compilation for
 kernels and drivers. It has no garbage collector and requires no runtime.
 
-> **Project status: compiler front end (Phase 2 complete).**
-> `ncc` can lex, parse and type-check programs written in a first subset
-> of the language (functions, primitive types, variables, arithmetic,
-> control flow) and report precise diagnostics. **It cannot generate code
-> yet**: no NovaC program can be compiled or run. Most of the language in
-> the documents below is designed but not implemented;
+> **Project status: native compilation (Phase 3).**
+> `ncc` compiles a first subset of the language (functions, primitive
+> types, variables, arithmetic, control flow) to native executables for
+> x86-64, AArch64 and RISC-V 64 Linux through LLVM. Every integer
+> overflow, division by zero, oversized shift and out-of-range conversion
+> panics instead of being undefined. Programs cannot yet call C or print
+> anything: they communicate through their exit status. Most of the
+> language in the documents below is designed but not implemented;
 > [docs/FEATURE_STATUS.md](docs/FEATURE_STATUS.md) is the authoritative
 > record of what works.
 
@@ -22,34 +24,42 @@ kernels and drivers. It has no garbage collector and requires no runtime.
 | Phase 0 investigation of NovarisOS and LibNovaC | [docs/NOVARISOS_INTEGRATION.md](docs/NOVARISOS_INTEGRATION.md) |
 | Phase 1 language specification | [docs/](docs/) |
 | Phase 2 front end: lexer, parser, name resolution, type checker, diagnostics | [src/](src/), tests in [tests/](tests/) |
+| Phase 3 back end: NIR with explicit checks, initialisation analysis, LLVM code generation, linking, cross-compilation, debug line tables | [src/nir/](src/nir/), [src/codegen/](src/codegen/) |
 | Documentation consistency checker | `tools/check_docs.py` (`make check-docs`) |
 
-Not implemented yet: code generation (Phase 3), C interoperability,
-structs, pointers and `unsafe` (Phase 4), ownership and borrowing
+Not implemented yet: C interoperability, structs, pointers and `unsafe`
+(Phase 4), ownership and borrowing
 (Phase 5), modules, generics, slices and the libraries (Phase 6), kernel
 features (Phase 7), concurrency and optimisation (Phase 8). The front end
 recognises these constructs and rejects them with error E9001, naming the
 phase that will implement them.
 
-Next: **Phase 3**, native code generation through LLVM. See
-[docs/NOVAC_ROADMAP.md](docs/NOVAC_ROADMAP.md).
+Next: **Phase 4**, C interoperability with structs, pointers and `unsafe`.
+See [docs/NOVAC_ROADMAP.md](docs/NOVAC_ROADMAP.md).
 
-## Trying the front end
+## Trying it
 
 ```bash
 make
 ```
 
 ```bash
-build/release-cc/ncc --check examples/phase2.nc
+build/release-cc/ncc -O2 examples/phase2.nc -o phase2 && ./phase2; echo $?
 ```
 
 ```bash
-build/release-cc/ncc --emit=typed examples/phase2.nc
+build/release-cc/ncc --target=aarch64-linux-gnu examples/phase2.nc -o phase2-arm64
 ```
 
-`--dump-tokens` and `--dump-ast` show the earlier stages. A program with
-mistakes gets diagnostics such as:
+`--dump-tokens`, `--dump-ast`, `--emit=typed`, `--emit=nir` and
+`--emit=llvm-ir` show each stage. A failed run-time check stops the
+program with its location:
+
+```text
+overflow.nc:2:32: panic: integer overflow in '+'
+```
+
+A program with mistakes gets diagnostics such as:
 
 ```text
 demo.nc:3:12: error[E4010]: operands of '+' have different types 'i32' and 'u8'
@@ -113,8 +123,11 @@ NovaC is one of several separate projects:
 
 ## Building and testing
 
-Requirements: a C11 compiler (GCC ≥ 13 or Clang ≥ 18), GNU Make, Python 3.
-LLVM is not needed until Phase 3.
+Requirements: a C11 compiler (GCC ≥ 13 or Clang ≥ 18), GNU Make, Python 3,
+and LLVM 18 with development files (e.g. `llvm-18-dev`). Cross-compiled
+executables need the cross GCC toolchains (`gcc-aarch64-linux-gnu`,
+`gcc-riscv64-linux-gnu`); running them in the tests needs `qemu-user`.
+Missing cross tools make the tests skip, and report, those targets.
 
 | Command | What it does |
 | --- | --- |

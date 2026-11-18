@@ -645,6 +645,74 @@ the variable inside its own initialiser is an error (E3003). Earlier
 declarators in the same declaration are already initialised and may be
 used (`i32 a = 1, b = a;`).
 
+## D-039 — Hosted panics: a weak default handler printing with `dprintf`
+
+**Status:** Accepted (Phase 3)
+
+**Context.** NOVAC_ABI.md §9 requires a `__nova_panic` symbol and says
+hosted programs get a default. Some code must print the message and stop
+the process, but D-015 and the brief forbid a mandatory runtime library.
+
+**Options.** (a) A runtime library linked into every program. (b) The
+default handler is generated into every hosted object as a *weak*
+definition: `dprintf(2, "<file>:<line>:<col>: panic: <message>\n")`, then
+`abort()`.
+
+**Decision.** (b). Both functions are standard C (glibc and LibNovaC
+provide them). The format matches compiler diagnostics. A program can
+replace the handler with a strong definition (Phase 4, `extern "C"` /
+`@panic_handler`). Freestanding targets get no default (Phase 7).
+
+**Consequences.** A panic ends the process with `SIGABRT`, exit status 134
+in a shell. No runtime file is linked, so Q-01 (licensing of linked code)
+still applies only to code generated into the program.
+
+## D-040 — `-Ofast` does not use `nnan` or `ninf`
+
+**Status:** Accepted (Phase 3). **Corrects NOVAC_COMPILER_ARCHITECTURE.md
+§10 of Phase 1**, which listed `nnan ninf` among the `-Ofast` flags.
+
+**Context.** Testing found that with LLVM's `nnan`, `i32(x / x)` with
+`x = 0.0` no longer panicked. Under `nnan`/`ninf`, an operation producing
+NaN or infinity yields *poison*, and branching on poison (as every check
+does) is undefined behaviour. That would make undefined behaviour
+reachable from safe code, contradicting D-009, D-016 and
+NOVAC_MEMORY_MODEL.md §1.
+
+**Decision.** `-Ofast` sets only `reassoc`, `nsz`, `arcp`, `contract` and
+`afn`. These may change floating-point *results* (by rounding, the sign of
+zero or approximate functions), but they never create poison.
+`tests/run/panic_conv_float_nan.nc` runs at `-Ofast` as a regression test.
+
+## D-041 — Definite initialisation is checked from Phase 3
+
+**Status:** Accepted (Phase 3). **Moves part of F-402 from Phase 5.**
+
+**Context.** Phase 2 accepted `i32 x; return x;` because no code was
+generated. Once code is generated, that program reads an indeterminate
+value: undefined behaviour from safe code.
+
+**Decision.** The definite-initialisation analysis (E5031) runs on NIR in
+Phase 3, before code generation and as part of `--check`. Move checking,
+the other half of NOVAC_MEMORY_MODEL.md §5, stays in Phase 5 with
+ownership.
+
+## D-042 — Hosted linking and cross testing use the GNU toolchain and QEMU
+
+**Status:** Accepted (Phase 3)
+
+**Decision.** Executables are linked by the C compiler driver for the
+target: `cc` on the host, and `aarch64-linux-gnu-gcc` or
+`riscv64-linux-gnu-gcc` when cross-compiling. The driver supplies the C
+library's start files and linker defaults (PIE, so code is generated
+position-independent). `--linker=` overrides it. Cross-compiled tests run
+under QEMU user-mode emulation with `QEMU_LD_PREFIX` pointing at the
+cross C library. Nova Linker remains future work (NOVAC_ABI.md §8).
+
+**Consequences.** Building cross executables needs the cross GCC packages.
+Running cross tests also needs `qemu-user`. When they are missing, the
+test runner reports those configurations as skipped, never as passed.
+
 ---
 
 ## Outstanding questions

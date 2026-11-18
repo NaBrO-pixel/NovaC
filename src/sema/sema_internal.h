@@ -4,25 +4,8 @@
 
 #include "sema/consteval.h"
 #include "sema/sema.h"
+#include "sema/symbols.h"
 #include "support/vec.h"
-
-/* A local variable or parameter. */
-typedef struct nc_var {
-    nc_sym name;
-    const nc_type *type;
-    bool is_const;
-    bool initializing; /* inside its own initialiser: any use is E3003 */
-    nc_span span;
-} nc_var;
-
-/* A function's resolved signature. NAME expressions bound to a function
- * point at one of these (binding_kind NC_BIND_FN). */
-typedef struct nc_fn_info {
-    nc_decl *decl;
-    const nc_type *ret;
-    const nc_type **params;
-    uint32_t nparams;
-} nc_fn_info;
 
 typedef struct nc_scope_entry {
     nc_sym name;

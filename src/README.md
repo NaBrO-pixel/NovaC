@@ -13,7 +13,11 @@ each with one public header; dependencies point downward only
 | `ast/` | syntax tree and its S-expression dump | 2 |
 | `parse/` | parser: declarations, statements, expressions, types | 2 |
 | `sema/` | name resolution, types, constant evaluation, type checking | 2 |
-| `driver/` | command line, front-end pipeline, `main` | 2 |
+| `nir/` | NovaC IR: lowering with explicit checks, verifier, dump | 3 |
+| `analysis/` | analyses on NIR: definite initialisation | 3 |
+| `target/` | target descriptions (triples, baselines, cross tools) | 3 |
+| `codegen/` | LLVM IR generation, optimisation, object and assembly output | 3 |
+| `driver/` | command line, pipeline, linking, `main` | 2–3 |
 
-Directories for later phases (`nir/`, `analysis/`, `target/`, `codegen/`)
-are created when they contain working, tested code.
+Directories for later phases are created when they contain working,
+tested code.

@@ -14,9 +14,18 @@
 PYTHON ?= python3
 CCNAME := $(notdir $(firstword $(CC)))
 
+# LLVM (D-003): located with llvm-config; override with LLVM_CONFIG=...
+LLVM_CONFIG ?= $(shell command -v llvm-config-18 2>/dev/null || command -v llvm-config 2>/dev/null)
+ifeq ($(LLVM_CONFIG),)
+$(error llvm-config not found: install LLVM 18 development files (e.g. llvm-18-dev) or set LLVM_CONFIG)
+endif
+LLVM_INCLUDE := $(shell $(LLVM_CONFIG) --includedir)
+LLVM_LIBDIR := $(shell $(LLVM_CONFIG) --libdir)
+LLVM_LIBS := -L$(LLVM_LIBDIR) -Wl,-rpath,$(LLVM_LIBDIR) $(shell $(LLVM_CONFIG) --libs) $(shell $(LLVM_CONFIG) --system-libs)
+
 WARN := -Wall -Wextra -Werror -Wshadow -Wstrict-prototypes -Wmissing-prototypes \
         -Wpointer-arith -Wformat=2 -Wno-format-nonliteral
-BASE_CFLAGS := -std=c11 $(WARN) -Isrc -MMD -MP
+BASE_CFLAGS := -std=c11 $(WARN) -Isrc -isystem $(LLVM_INCLUDE) -MMD -MP
 
 ifeq ($(DEBUG),1)
 CONFIG := debug
@@ -52,10 +61,10 @@ $(BUILD)/libncc.a: $(LIB_OBJ)
 	ar rcs $@ $^
 
 $(BUILD)/ncc: $(BUILD)/src/driver/main.o $(BUILD)/libncc.a
-	$(CC) $(ALL_LDFLAGS) -o $@ $^ -lm
+	$(CC) $(ALL_LDFLAGS) -o $@ $^ $(LLVM_LIBS) -lm
 
 $(BUILD)/unit_tests: $(UNIT_OBJ) $(BUILD)/libncc.a
-	$(CC) $(ALL_LDFLAGS) -o $@ $^ -lm
+	$(CC) $(ALL_LDFLAGS) -o $@ $^ $(LLVM_LIBS) -lm
 
 unit: $(BUILD)/unit_tests
 	$(BUILD)/unit_tests
@@ -82,7 +91,7 @@ check-docs:
 
 # ---- fuzzing (NOVAC_ROADMAP.md step 2.8) ----
 FUZZ_BUILD := build/fuzz
-FUZZ_CFLAGS := -std=c11 $(WARN) -Isrc -O1 -g -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=all
+FUZZ_CFLAGS := -std=c11 $(WARN) -Isrc -isystem $(LLVM_INCLUDE) -O1 -g -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=all
 FUZZ_LIB_OBJ := $(LIB_SRC:%.c=$(FUZZ_BUILD)/%.o)
 FUZZ_SECONDS ?= 60
 
@@ -93,7 +102,7 @@ $(FUZZ_BUILD)/%.o: %.c
 fuzz: $(FUZZ_BUILD)/fuzz_frontend
 
 $(FUZZ_BUILD)/fuzz_frontend: $(FUZZ_BUILD)/tests/fuzz/fuzz_frontend.o $(FUZZ_LIB_OBJ)
-	clang -fsanitize=fuzzer,address,undefined -o $@ $^ -lm
+	clang -fsanitize=fuzzer,address,undefined -o $@ $^ $(LLVM_LIBS) -lm
 
 fuzz-run: fuzz
 	@mkdir -p $(FUZZ_BUILD)/corpus

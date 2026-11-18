@@ -10,8 +10,8 @@ repository. Feature-level status is in [FEATURE_STATUS.md](FEATURE_STATUS.md).
 | 0 | Repository and architecture investigation | ✅ Complete |
 | 1 | Formal specification | ✅ Complete (this commit series) |
 | 2 | Compiler foundation | ✅ Complete |
-| 3 | Native compilation | ⏳ Next |
-| 4 | C interoperability (plus aggregates, raw pointers, unsafe) | Planned |
+| 3 | Native compilation | ⏳ Implemented; final fuzzing run pending |
+| 4 | C interoperability (plus aggregates, raw pointers, unsafe) | Next |
 | 5 | Memory safety | Planned |
 | 6 | Advanced language features | Planned |
 | 7 | Systems programming | Planned |
@@ -130,14 +130,32 @@ strings, ownership. These are not stubbed: they are rejected (E9001).
 
 ## Phase 3 — Native compilation
 
+**Result.** Everything listed below is implemented and tested.
+- **Tests:** `make test-all` (GCC 13 and Clang 18, ASan + UBSan) passes:
+  4,296 unit-test checks and 136 runner tests (3 NIR golden, 9 LLVM IR,
+  26 execution, 35 command-line, plus the Phase 2 suites).
+- **Execution coverage:** each execution test runs natively at `-O0`,
+  `-O1`, `-O2`, `-O3`, `-Os`, `-Ofast` and `-O2 -g`. It also runs as
+  AArch64 and RISC-V executables under QEMU at `-O0` and `-O2`, so the
+  cross targets are verified by execution, not only by disassembly.
+- **Panic coverage:** 20 of the execution tests check one panic each,
+  covering every kind of run-time check.
+- **Departures from the plan:** the hosted panic handler uses `dprintf`
+  rather than `write`, so it can format the location (D-039). Definite
+  initialisation was brought forward from Phase 5 (D-041). `-Ofast`
+  excludes `nnan`/`ninf` (D-040).
+- **Still open:** Q-01 (licensing of compiled programs), which was to be
+  answered before linked programs exist. Programs are now linked; the
+  question is reported to the owner.
+
 Prerequisites: LLVM 18 development headers (`llvm-18-dev`); for cross
 execution tests, `qemu-aarch64` and `qemu-riscv64` user-mode.
 
 - NIR definition, lowering of the Phase 2 subset, verifier, `--dump-nir`.
 - LLVM IR generation, overflow/division/shift/conversion checks branching
   to `__nova_panic`; default hosted panic handler (emitted by the
-  compiler, calling the C library's `write` and `abort`; no runtime
-  library file).
+  compiler, calling the C library's `dprintf` and `abort`; no runtime
+  library file; D-039).
 - Optimisation levels `-O0`…`-Ofast` (NOVAC_COMPILER_ARCHITECTURE.md §10).
 - Object, assembly and bitcode output; linking hosted executables on
   `x86_64-linux-gnu` through the system C compiler driver.

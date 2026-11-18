@@ -327,6 +327,7 @@ static nc_fn_info *declare_function(nc_sema *sm, nc_decl *d)
         return NULL;
     }
     nc_vec_push(&sm->fns, fn);
+    d->u.fn.info = fn;
     return fn;
 }
 

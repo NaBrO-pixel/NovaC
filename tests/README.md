@@ -12,9 +12,14 @@ at the top of that file and in
 | `parse/` | syntax trees | `--dump-ast` vs `<name>.expected` |
 | `sema/` | typed syntax trees with constant values | `--emit=typed` vs `<name>.expected` |
 | `diag/` | invalid programs, one or more per diagnostic code | inline `// ERROR Ennnn` expectations |
+| `nir/` | NIR after lowering | `--emit=nir` vs `<name>.expected` |
+| `codegen/` | LLVM IR properties | ordered `// CHECK:` / `// CHECK-NOT:` lines |
+| `run/` | programs built and executed natively (7 configurations) and under QEMU (AArch64, RISC-V) | `// EXIT: n` or `// PANIC: message` on the panicking line |
 | `driver/` | input files for the command-line cases in `run_tests.py` | exit status and codes |
 | `selftest/` | fixtures the runner must reject | `run_tests.py --selftest` |
 | `fuzz/` | libFuzzer harness and dictionary | `make fuzz-run` |
-| `regress/` | one test per fixed bug (none yet) | `// MODE:` line, default `--check` |
+| `regress/` | one test per fixed bug | `// MODE:` line, default `--check` |
 
 The programs in `../examples/` are also checked (`--check`, no errors).
+Set `NOVAC_CROSS=0` to skip the cross-target runs; skipped configurations
+are listed at the end of the run, never counted as passes.

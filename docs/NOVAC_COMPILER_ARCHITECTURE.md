@@ -162,9 +162,14 @@ Warnings use `W` with the same ranges. Codes defined in this document:
 | E0003 | invalid option value |
 | E0004 | no input files |
 | E0005 | input file too large (4 GiB or more) |
+| E8001 | code generation failed (target set-up, optimisation or writing the output; the LLVM message is included) |
+| E8002 | the linker ran and failed |
+| E8003 | the linker could not be started (not installed, or a wrong `--linker=`) |
+| E8004 | an executable was requested but no input defines `main` |
+| E8005 | `main` does not have the signature `i32 main()` |
 | E8010 | object compiled against a different interface hash of an imported module |
 | E9002 | command-line option recognised but not implemented in this version |
-| E9003 | code generation requested (the default action) but not implemented in this version |
+| E9003 | code generation requested but not implemented (reported by Phase 2 only; retired, never reused) |
 
 ### 6.3 Error recovery
 
@@ -263,14 +268,29 @@ A control-flow graph per function, in the style of Rust's MIR:
   dest, next)`, `return`, `assert(cond, panic_kind, next)`,
   `unreachable`.
 
-NIR is not SSA; LLVM's `mem2reg`/SROA produce SSA. A verifier
-(`nir/verify.c`) checks well-formedness after every NIR transformation in
-debug builds. `--dump-nir` prints a stable text form.
+NIR is not SSA; LLVM's `mem2reg`/SROA produce SSA. A verifier checks
+well-formedness after lowering, in every build (a failure is an internal
+compiler error). `--dump-nir` (`--emit=nir`) prints a stable text form.
+
+**Implemented in Phase 3** (`src/nir/`): places are whole locals of
+primitive type (projections arrive with aggregates in Phase 4).
+Statements are `assign(local, rvalue)` and `checked(op, a, b)`, which
+writes the wrapped result and an overflow flag. Rvalues are `use`,
+`binary`, `unary` and `cast`; operands are `copy` and `const`.
+Terminators are `goto`, `branch`, `call`, `return`, `unreachable` and
+`assert(cond, expected, message)`. Every run-time check of
+NOVAC_TYPE_SYSTEM.md (overflow, division by zero, `MIN / -1`, shift
+amount, conversion range) is an explicit `assert`, so analyses and code
+generation see the same program. `move`, `switch_int`, `drop`,
+`storage_live/dead` and the other planned forms arrive with the phases
+that need them.
 
 ### 9.2 Analyses (`analysis/`)
 
-1. Definite initialisation and move checking (forward dataflow over
-   "maybe-uninitialised" sets of move paths).
+1. Definite initialisation (implemented in Phase 3, `analysis/init.c`:
+   a forward "must" dataflow over the CFG for declared variables, E5031;
+   branches on constant conditions have one successor, as in the type
+   checker's return-path analysis) and move checking (Phase 5).
 2. Borrow checking: compute borrow liveness (backward liveness of
    reference-typed locals), then check each access against live
    conflicting borrows (NOVAC_MEMORY_MODEL.md §4). Two-phase borrows for
@@ -291,9 +311,12 @@ features, code model, and its C ABI classifier
 - One LLVM module per NovaC module. Functions declared first, bodies
   second.
 - NIR locals become `alloca`s in the entry block; LLVM promotes them.
-- `checked_binary` uses `llvm.{s,u}{add,sub,mul}.with.overflow`; failure
-  branches go to a shared cold block per function that calls
-  `__nova_panic` (`noreturn`, `cold`).
+- `checked` statements use `llvm.{s,u}{add,sub,mul}.with.overflow`; each
+  failing `assert` branches to its own block that calls `__nova_panic`
+  (`noreturn`, `cold`) with a static description of that site
+  (NOVAC_ABI.md §9.1), then `unreachable`.
+- Hosted modules carry a weak default `__nova_panic` (D-039). A NovaC
+  `main` is wrapped by a C `main` (NOVAC_ABI.md §7).
 - Bounds checks compare against the length and branch likewise.
 - Attributes: `nounwind` everywhere (D-015); `noredzone` and target
   features for kernel targets (NOVAC_ABI.md §10.2).
@@ -310,7 +333,7 @@ features, code model, and its C ABI classifier
 | `-O3` | `default<O3>` | more inlining, unrolling, vectorisation |
 | `-Os` | `default<Os>` | |
 | `-Oz` | `default<Oz>` | |
-| `-Ofast` | `default<O3>` | adds fast-math flags (`nnan ninf nsz arcp contract afn reassoc`) on floating-point operations. **Does not** remove overflow, bounds or conversion checks (D-016) |
+| `-Ofast` | `default<O3>` | adds the fast-math flags `reassoc nsz arcp contract afn` to floating-point operations. Not `nnan`/`ninf`: under them a NaN or infinity becomes poison, and a check branching on poison is undefined behaviour (D-040). **Does not** remove overflow, bounds or conversion checks (D-016) |
 
 - **Inlining, constant propagation, DCE, loop optimisation,
   vectorisation, register allocation, instruction selection:** provided by
@@ -353,7 +376,14 @@ ncc [options] <file.nc>...
 ```
 
 Exit status: 0 success; 1 compilation errors; 2 command-line errors;
-3 internal compiler error. Options are introduced in the phase that
+3 internal compiler error.
+
+The default action compiles and links an executable (`a.out`). The
+default optimisation level is `-O0`. Without `-o`, `-c`, `-S` and
+`--emit=llvm-bc` write `<stem>.o`, `.s` and `.bc` in the current
+directory, and `--emit=llvm-ir` writes to standard output. Executables are
+linked by the target's C compiler driver: `cc` for the host, and
+`<triple>-gcc` when cross-compiling (`--linker=` overrides it). Options are introduced in the phase that
 implements them; an option that exists in this list but is not yet
 implemented is rejected with E9002, not ignored.
 
@@ -366,8 +396,9 @@ implemented is rejected with E9002, not ignored.
 | `tests/parse/` | `.nc` + expected `--dump-ast` (`.ast`) | same | 2 |
 | `tests/sema/` | valid programs, expected typed dump | same | 2 |
 | `tests/diag/` | invalid programs with inline expectations | same | 2 |
-| `tests/run/` | programs compiled, executed, stdout/exit status checked | same | 3 |
-| `tests/codegen/` | `--emit=llvm-ir` with pattern checks | same | 3 |
+| `tests/nir/` | `--emit=nir` golden files | `tests/run_tests.py` | 3 |
+| `tests/run/` | programs compiled and executed natively at -O0…-Ofast and -g, and under QEMU for AArch64 and RISC-V; exit status or panic message and location checked | same | 3 |
+| `tests/codegen/` | `--emit=llvm-ir` with ordered `// CHECK:` / `// CHECK-NOT:` patterns | same | 3 |
 | `tests/abi/` | NovaC ↔ C cross-calls (NOVAC_ABI.md §12) | same | 4 |
 | `tests/borrow/` | ownership/borrow positive and negative tests | same | 5 |
 | `tests/regress/` | one test per fixed bug, named by issue | same | from 2 |

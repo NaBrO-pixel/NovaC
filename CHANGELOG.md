@@ -6,6 +6,35 @@ released versions yet.
 
 ## [Unreleased]
 
+### Added — Phase 3: native compilation
+
+- NIR (`src/nir/`): lowering of the checked AST to a control-flow graph in
+  which every run-time check is an explicit `assert`; verifier; `--emit=nir`.
+- Definite-initialisation analysis on NIR (E5031), brought forward from
+  Phase 5 because generated code must not read indeterminate values (D-041).
+- LLVM back end (`src/codegen/`, LLVM 18 through the C API): checked
+  arithmetic with the overflow intrinsics, a panic call per failing check,
+  a weak hosted panic handler (D-039), a C `main` wrapper, symbol mangling
+  per NOVAC_ABI.md §7, DWARF 5 line tables (`-g`), and optimisation levels
+  `-O0` to `-Ofast`.
+- Outputs: executables (default), `-c`, `-S`, `--emit=llvm-ir`,
+  `--emit=llvm-bc`; targets `x86_64-linux-gnu`, `aarch64-linux-gnu` and
+  `riscv64-linux-gnu` (`--target=`, `-mcpu=`, `-mattr=`); `--linker=`;
+  `-fpanic=minimal`.
+- Diagnostics E8001 to E8005.
+- Tests: `tests/run/` executes programs natively at seven configurations
+  and under QEMU for AArch64 and RISC-V; `tests/nir/` golden NIR;
+  `tests/codegen/` LLVM IR checks.
+
+### Fixed during Phase 3
+
+- `-Ofast` used `nnan`/`ninf`, which made a NaN conversion check
+  ineffective (undefined behaviour from safe code). It now uses only flags
+  that cannot create poison (D-040).
+- The initialisation analysis treated `while (true)` as able to exit at
+  its condition; constant branches now have one successor.
+
+
 ### Added — Phase 2: compiler front end
 
 - `ncc`, the compiler driver (C11, GNU Make; D-001, D-002) with `--check`,
