@@ -31,7 +31,10 @@ unsigned nc_sema_attrs(nc_sema *sm, const nc_attr *a, uint32_t n, unsigned allow
             nc_diag_error(NC_DIAG(sm), a[i].span, "E3040", "unknown attribute '@%s'", name);
             continue;
         }
-        unsigned flag = strcmp(name, "packed") == 0 ? NC_ATTR_PACKED : strcmp(name, "repr") == 0 ? NC_ATTR_REPR : 0;
+        unsigned flag = strcmp(name, "packed") == 0  ? NC_ATTR_PACKED
+                        : strcmp(name, "repr") == 0  ? NC_ATTR_REPR
+                        : strcmp(name, "mode") == 0  ? NC_ATTR_MODE
+                                                     : 0;
         if (!flag) {
             nc_diag_error(NC_DIAG(sm), a[i].span, "E9001", "attribute '@%s' is not implemented in this version", name);
             continue;
@@ -43,6 +46,17 @@ unsigned nc_sema_attrs(nc_sema *sm, const nc_attr *a, uint32_t n, unsigned allow
         if (flag == NC_ATTR_PACKED && a[i].has_parens) {
             nc_diag_error(NC_DIAG(sm), a[i].span, "E3041", "'@packed' takes no arguments");
             continue;
+        }
+        if (flag == NC_ATTR_MODE) {
+            const nc_expr *arg = a[i].nargs == 1 ? a[i].args[0].value : NULL;
+            const char *m = arg && arg->kind == NC_E_NAME ? nc_sema_sym(sm, arg->u.name) : "";
+            if (strcmp(m, "safe") == 0) sm->mode = NC_MODE_SAFE;
+            else if (strcmp(m, "controlled") == 0) sm->mode = NC_MODE_CONTROLLED;
+            else if (strcmp(m, "kernel") == 0) sm->mode = NC_MODE_KERNEL;
+            else {
+                nc_diag_error(NC_DIAG(sm), a[i].span, "E3041", "'@mode' takes one argument: `safe`, `controlled` or `kernel`");
+                continue;
+            }
         }
         if (flag == NC_ATTR_REPR) {
             /* @repr(C): C layout is already the default (D-017). */
@@ -214,7 +228,13 @@ const nc_type *nc_sema_resolve_type(nc_sema *sm, const nc_type_expr *te, bool *i
     case NC_TE_ERROR: return nc_ty_error();
     case NC_TE_ARRAY: return array_type(sm, te, is_const);
     case NC_TE_SELF: what = "`Self` is"; phase = 5; break;
-    case NC_TE_PTR: what = "pointer types are"; phase = 4; break;
+    case NC_TE_PTR: {
+        /* The pointee need not be complete: `struct Node { Node* next; }`. */
+        bool pointee_const;
+        const nc_type *inner = nc_sema_resolve_type(sm, te->u.inner, &pointee_const);
+        if (nc_ty_is_error(inner)) return inner;
+        return nc_ty_ptr(sm->s, inner, pointee_const);
+    }
     case NC_TE_REF: what = "reference types are"; phase = 5; break;
     case NC_TE_FN: what = "function pointer types are"; phase = 4; break;
     case NC_TE_PATH: {

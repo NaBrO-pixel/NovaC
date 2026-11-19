@@ -13,7 +13,7 @@ Status vocabulary (checked by `tools/check_docs.py`):
 | Open | design not decided (see the question in NOVAC_DECISIONS.md) |
 | Unsupported | deliberately not part of NovaC, or out of scope for version 1 |
 
-Last updated: Phase 4 (step 4a).
+Last updated: Phase 4 (step 4b).
 
 ## Implemented
 
@@ -21,7 +21,7 @@ Last updated: Phase 4 (step 4a).
 | --- | --- | --- | --- | --- |
 | F-001 | Phase 1 specification documents | Implemented | 1 | `docs/` |
 | F-002 | Documentation consistency checker (also checks the implementation's keywords and diagnostic codes against the docs) | Implemented | 1 | `tools/check_docs.py`, `make check-docs` |
-| F-100 | `ncc` driver: `--check`, `--dump-tokens`, `--dump-ast`, `--emit=typed`, `-Werror`, `--error-limit`; later-phase options rejected (E9002) | Implemented | 2 | `tests/driver/`, `DRIVER_CASES` in `tests/run_tests.py` |
+| F-100 | `ncc` driver: `--check`, `--dump-tokens`, `--dump-ast`, `--emit=typed`, `-Werror`, `--error-limit`, `--max-mode=` (Phase 4b); later-phase options rejected (E9002) | Implemented | 2 | `tests/driver/`, `DRIVER_CASES` in `tests/run_tests.py` |
 | F-101 | Diagnostics engine with codes, source excerpts, notes, help, error limit | Implemented | 2 | `tests/unit/test_diag.c`, every test in `tests/diag/` |
 | F-102 | Lexer for the complete token set, `--dump-tokens` | Implemented | 2 | `tests/lex/`, `tests/diag/lex_*.nc`, `tests/unit/test_lexer.c` |
 | F-103 | Parser and AST for the [P2] subset with error recovery, `--dump-ast`; the full expression and type grammar is parsed; later-phase declarations and statements are recognised and rejected (E9001) | Implemented | 2 | `tests/parse/`, `tests/diag/parse_*.nc` |
@@ -40,15 +40,17 @@ Last updated: Phase 4 (step 4a).
 | F-208 | Definite initialisation of local variables (E5031; moved from F-402, D-041) | Implemented | 3 | `tests/diag/init_uninitialised.nc`, `tests/diag/init_partial.nc` |
 | F-300 | Structs (C layout, `@packed`, `@repr(C)`, opaque declarations), unions (initialise and write; reads need `unsafe`, F-302), enums with underlying types and checked conversions, arrays with bounds-checked indexing, `typedef`, `constexpr`, immutable `static const`, initialiser lists and struct literals with zero fill (D-043), `sizeof`/`alignof`/`offsetof`, character literals, `switch` with case lists, `fallthrough` and exhaustiveness (D-025) | Implemented | 4 | `tests/run/{structs,arrays,enums_switch,statics,layout,big_arrays,aggregate_arg_loop}.nc`, `tests/run/panic_{index,index_write,enum_convert,enum_range}.nc`, `tests/diag/sema_{struct,enum,array,init,switch,static,attrs,limits}.nc`, `tests/parse/aggregates.nc`, `tests/sema/aggregates.nc`, `tests/nir/places.nc`, `tests/codegen/aggregates.nc` |
 
+| F-301 | Raw pointers `T*` / `const T*`, `null`, `&x` / `&mut x` where a pointer is expected (D-044), dereference, `->`, indexing and arithmetic through pointers, comparisons, `addr`, `ptr_cast`, `ptr_cast_mut`, `ptr_from_addr` | Implemented | 4 | `tests/run/pointers.nc`, `tests/diag/pointers.nc`, `tests/diag/init_pointer.nc`, `tests/parse/pointers.nc`, `tests/nir/pointers.nc`, `tests/codegen/pointers.nc` |
+| F-302 | `@mode(...)` (safe, controlled, kernel), `unsafe` blocks and functions, E6001/E6003 for every unsafe operation of NOVAC_MEMORY_MODEL.md §6.1 implemented so far (pointer access and arithmetic, unsafe calls, union reads, mutable statics, `uninit`, `ptr_cast_mut`, `ptr_from_addr`), `--max-mode=` (E6004). Planned: W6010, E6002 (no kernel-only operation exists yet) | Implemented | 4 | `tests/run/unsafe_features.nc`, `tests/diag/unsafe_ops.nc`, `tests/diag/unsafe_safe_module.nc`, `--max-mode` cases in `tests/run_tests.py` |
 Programs in the Phase 2 language subset, plus the aggregate types, enums
-and `switch` of F-300, compile to native executables for x86-64, AArch64
+and `switch` of F-300 and the pointers and unsafe code of F-301 and F-302, compile to native executables for x86-64, AArch64
 and RISC-V 64 Linux.
 
 Known limitations (each is a later phase's feature, not a defect):
 
 - Single-file programs only; `import` is rejected (F-500).
-- Mutable statics, union field reads, `uninit` and raw pointers need
-  `unsafe` (F-301, F-302) and are rejected with E9001 for now.
+- Pointers made with `&x` carry no lifetime; references and borrow
+  checking are Phase 5 (D-044).
 - Generic structs, `static` locals, constexprs of aggregate type, and
   every construct of a later phase are rejected with E9001 naming the
   phase.
@@ -59,8 +61,6 @@ Known limitations (each is a later phase's feature, not a defect):
 
 | ID | Feature | Status | Phase | Reference |
 | --- | --- | --- | --- | --- |
-| F-301 | Raw pointers | Planned | 4 | NOVAC_TYPE_SYSTEM.md §3.6 |
-| F-302 | Modes, `unsafe` blocks and functions, unsafe-operation checks | Planned | 4 | NOVAC_MEMORY_MODEL.md §2, §6 |
 | F-303 | `extern "C"` import/export, FFI-safety checks | Planned | 4 | NOVAC_ABI.md §11 |
 | F-304 | C ABI lowering: x86-64 SysV, AArch64, RISC-V LP64D | Planned | 4 | NOVAC_ABI.md §5 |
 | F-305 | ABI conformance tests against Clang | Planned | 4 | NOVAC_ABI.md §12 |

@@ -27,6 +27,8 @@ typedef struct nc_loop_ctx {
  * module (E9005): each array list element costs a slot during checking. */
 #define NC_MAX_LIST_ELEMS ((uint64_t)1 << 22)
 
+typedef enum nc_mode { NC_MODE_SAFE, NC_MODE_CONTROLLED, NC_MODE_KERNEL } nc_mode;
+
 typedef struct nc_sema {
     nc_session *s;
     nc_module_ast *m;
@@ -38,6 +40,8 @@ typedef struct nc_sema {
     nc_fn_info *cur_fn;
     bool fallthrough_ok;           /* checking the last statement of a non-final case */
     uint64_t list_elems;           /* array elements expanded by initialiser lists so far */
+    nc_mode mode;                  /* the module's @mode (NOVAC_MEMORY_MODEL.md §2) */
+    unsigned unsafe_depth;         /* nesting of `unsafe { }` blocks */
 } nc_sema;
 
 /* ---- diagnostics helpers ---- */
@@ -66,7 +70,10 @@ void nc_sema_collect(nc_sema *sm);
 /* Resolve every non-function declaration (layouts, values), reporting errors
  * even in unused ones. */
 void nc_sema_resolve_decls(nc_sema *sm);
-enum { NC_ATTR_PACKED = 1u << 0, NC_ATTR_REPR = 1u << 1 };
+enum { NC_ATTR_PACKED = 1u << 0, NC_ATTR_REPR = 1u << 1, NC_ATTR_MODE = 1u << 2 };
+/* Is the current code in an unsafe context? If not, reports E6003 for
+ * `what` ("dereferencing a raw pointer") and returns false. */
+bool nc_sema_require_unsafe(nc_sema *sm, nc_span span, const char *what);
 /* Checks attributes: unknown names are E3040, known but unimplemented ones
  * E9001, implemented ones outside `allowed` E3041. Returns the flags of the
  * accepted ones. */

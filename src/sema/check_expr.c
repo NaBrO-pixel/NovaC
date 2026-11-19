@@ -18,6 +18,7 @@
 #include <string.h>
 
 static const nc_type *check_expr(nc_sema *sm, nc_expr **slot, const nc_type *expected);
+static bool pointee_ok(nc_sema *sm, const nc_type *pt, nc_span span, const char *what);
 
 static const nc_type *set_type(nc_expr *e, const nc_type *t)
 {
@@ -107,7 +108,18 @@ bool nc_coerce(nc_sema *sm, nc_expr **slot, const nc_type *to, const char *what)
         fail(e);
         return false;
     }
-    if (nc_ty_widens(from, to)) {
+    if (from->kind == NC_TY_NULL) {
+        if (nc_ty_is_ptr(to)) {
+            set_type(e, to);
+            return true;
+        }
+        nc_diag_error(NC_DIAG(sm), e->span, "E4001", "mismatched types in %s: expected '%s', found `null`", what,
+                      nc_type_name(to));
+        fail(e);
+        return false;
+    }
+    bool ptr_widens = nc_ty_is_ptr(from) && nc_ty_is_ptr(to) && from->elem == to->elem && to->pointee_const;
+    if (ptr_widens || nc_ty_widens(from, to)) {
         nc_expr *conv = nc_arena_alloc(&sm->s->arena, sizeof *conv);
         conv->kind = NC_E_IMPLICIT;
         conv->span = e->span;
@@ -121,6 +133,10 @@ bool nc_coerce(nc_sema *sm, nc_expr **slot, const nc_type *to, const char *what)
                   nc_type_name(to), nc_type_name(from));
     if (nc_ty_is_numeric(from) && nc_ty_is_numeric(to))
         nc_diag_help(NC_DIAG(sm), "convert explicitly with `%s(...)` (D-010)", nc_type_name(to));
+    else if (nc_ty_is_ptr(from) && nc_ty_is_ptr(to) && from->pointee_const && !to->pointee_const && from->elem == to->elem)
+        nc_diag_help(NC_DIAG(sm), "a pointer to const cannot become a pointer to non-const (`ptr_cast_mut` is unsafe)");
+    else if (nc_ty_is_ptr(from) && nc_ty_is_ptr(to))
+        nc_diag_help(NC_DIAG(sm), "convert the pointer explicitly with `ptr_cast::<%s>(...)`", nc_type_name(to));
     fail(e);
     return false;
 }
@@ -128,6 +144,12 @@ bool nc_coerce(nc_sema *sm, nc_expr **slot, const nc_type *to, const char *what)
 void nc_default_untyped(nc_sema *sm, nc_expr **slot)
 {
     const nc_type *t = (*slot)->type;
+    if (nc_ty_is_null(t)) {
+        nc_diag_error(NC_DIAG(sm), (*slot)->span, "E4001", "the pointer type of `null` cannot be inferred here");
+        nc_diag_help(NC_DIAG(sm), "write the type, e.g. `u8* p = null;`");
+        fail(*slot);
+        return;
+    }
     if (t && t->kind == NC_TY_UNTYPED_INT)
         nc_coerce(sm, slot, nc_ty_prim(NC_PRIM_I32), "the default type 'i32' of an integer constant");
     else if (t && t->kind == NC_TY_UNTYPED_FLOAT)
@@ -167,9 +189,16 @@ static const nc_type *unify(nc_sema *sm, const char *op, nc_span op_span, nc_exp
         }
         return nc_ty_untyped_int();
     }
-    if (nc_ty_is_untyped(lt)) return nc_coerce(sm, l, rt, what) ? rt : nc_ty_error();
-    if (nc_ty_is_untyped(rt)) return nc_coerce(sm, r, lt, what) ? lt : nc_ty_error();
+    if (nc_ty_is_untyped(lt) || nc_ty_is_null(lt)) return nc_coerce(sm, l, rt, what) ? rt : nc_ty_error();
+    if (nc_ty_is_untyped(rt) || nc_ty_is_null(rt)) return nc_coerce(sm, r, lt, what) ? lt : nc_ty_error();
     if (lt == rt) return lt;
+    if (nc_ty_is_ptr(lt) && nc_ty_is_ptr(rt) && lt->elem == rt->elem) {
+        /* `T*` and `const T*` meet at `const T*`. */
+        const nc_type *c = nc_ty_ptr(sm->s, lt->elem, true);
+        bool ok = nc_coerce(sm, l, c, what);
+        ok &= nc_coerce(sm, r, c, what);
+        return ok ? c : nc_ty_error();
+    }
     nc_diag_error(NC_DIAG(sm), op_span, "E4010", "operands of '%s' have different types '%s' and '%s'", op,
                   nc_type_name(lt), nc_type_name(rt));
     if (nc_ty_is_numeric(lt) && nc_ty_is_numeric(rt)) {
@@ -248,11 +277,45 @@ static const nc_type *fold_float_arith(nc_expr *e, nc_binop op, double a, double
     return set_type(e, t);
 }
 
+/* `p + n`, `p - n` (pointer) and `p - q` (isize): unsafe (NOVAC_MEMORY_MODEL.md §6.1). */
+static const nc_type *check_ptr_arith(nc_sema *sm, nc_expr *e)
+{
+    nc_binop op = e->u.binary.op;
+    const nc_type *pt = e->u.binary.lhs->type;
+    bool ok = pointee_ok(sm, pt, e->u.binary.lhs->span, "pointer arithmetic");
+    nc_check_value(sm, &e->u.binary.rhs, NULL);
+    nc_expr *peek = e->u.binary.rhs;
+    if (op == NC_BIN_SUB && (nc_ty_is_ptr(peek->type) || nc_ty_is_null(peek->type))) {
+        const nc_type *t = unify(sm, "-", e->span, &e->u.binary.lhs, &e->u.binary.rhs);
+        if (nc_ty_is_error(t) || !ok) return fail(e);
+        if (nc_ty_size(pt->elem) == 0) {
+            nc_diag_error(NC_DIAG(sm), e->span, "E4011", "the difference of pointers to the zero-sized type '%s' is undefined",
+                          nc_type_name(pt->elem));
+            return fail(e);
+        }
+        if (!nc_sema_require_unsafe(sm, e->span, "pointer arithmetic")) return fail(e);
+        return set_type(e, nc_ty_prim(NC_PRIM_ISIZE));
+    }
+    /* Re-check the offset in its own context (an untyped constant becomes isize). */
+    if (nc_ty_is_untyped(peek->type)) {
+        ok &= nc_coerce(sm, &e->u.binary.rhs, nc_ty_prim(NC_PRIM_ISIZE), "a pointer offset");
+    } else if (!nc_ty_is_error(peek->type) && peek->type != nc_ty_prim(NC_PRIM_ISIZE) &&
+               peek->type != nc_ty_prim(NC_PRIM_USIZE)) {
+        nc_diag_error(NC_DIAG(sm), peek->span, "E4001", "a pointer offset must have type 'isize' or 'usize', found '%s'",
+                      nc_type_name(peek->type));
+        ok = false;
+    }
+    if (!ok || nc_ty_is_error(e->u.binary.rhs->type)) return fail(e);
+    if (!nc_sema_require_unsafe(sm, e->span, "pointer arithmetic")) return fail(e);
+    return set_type(e, pt);
+}
+
 static const nc_type *check_arith(nc_sema *sm, nc_expr *e, const nc_type *expected)
 {
     nc_binop op = e->u.binary.op;
     const char *sp = nc_binop_spelling(op);
     nc_check_value(sm, &e->u.binary.lhs, expected);
+    if (nc_ty_is_ptr(e->u.binary.lhs->type) && (op == NC_BIN_ADD || op == NC_BIN_SUB)) return check_ptr_arith(sm, e);
     nc_check_value(sm, &e->u.binary.rhs, expected);
     const nc_type *t = unify(sm, sp, op_span(e), &e->u.binary.lhs, &e->u.binary.rhs);
     if (nc_ty_is_error(t)) return fail(e);
@@ -381,17 +444,28 @@ static const nc_type *check_shift(nc_sema *sm, nc_expr *e, const nc_type *expect
     return set_type(e, t);
 }
 
+static bool is_addr_of(const nc_expr *e)
+{
+    return e->kind == NC_E_UNARY && (e->u.unary.op == NC_UN_ADDR || e->u.unary.op == NC_UN_ADDR_MUT);
+}
+
 static const nc_type *check_compare(nc_sema *sm, nc_expr *e)
 {
     nc_binop op = e->u.binary.op;
     const char *sp = nc_binop_spelling(op);
-    nc_check_value(sm, &e->u.binary.lhs, NULL);
-    nc_check_value(sm, &e->u.binary.rhs, NULL);
+    /* `p == &x`: a pointer operand gives `&x` its expected type. */
+    nc_expr **first = &e->u.binary.lhs, **second = &e->u.binary.rhs;
+    if (is_addr_of(*first) && !is_addr_of(*second)) {
+        first = &e->u.binary.rhs;
+        second = &e->u.binary.lhs;
+    }
+    const nc_type *ft = nc_check_value(sm, first, NULL);
+    nc_check_value(sm, second, nc_ty_is_ptr(ft) ? ft : NULL);
     const nc_type *t = unify(sm, sp, op_span(e), &e->u.binary.lhs, &e->u.binary.rhs);
     set_type(e, nc_ty_prim(NC_PRIM_BOOL));
     if (nc_ty_is_error(t)) return e->type;
     bool equality = op == NC_BIN_EQ || op == NC_BIN_NE;
-    bool numeric = nc_ty_is_untyped(t) || nc_ty_is_numeric(t);
+    bool numeric = nc_ty_is_untyped(t) || nc_ty_is_numeric(t) || nc_ty_is_ptr(t); /* pointers: address order */
     if (!(numeric || (equality && (nc_ty_is_bool(t) || nc_ty_is_enum(t))))) {
         nc_diag_error(NC_DIAG(sm), e->span, "E4011", "operator '%s' cannot be applied to type '%s'", sp, nc_type_name(t));
         return e->type;
@@ -470,9 +544,6 @@ static const nc_type *check_binary(nc_sema *sm, nc_expr *e, const nc_type *expec
 
 /* ---- names, fields, indexing --------------------------------------------------------------- */
 
-static const char *mutable_static_msg = "mutable statics can only be accessed in `unsafe` code, which is not implemented "
-                                        "in this version (Phase 4)";
-
 /* A NAME that is not a local variable: a module-level item. */
 static const nc_type *check_module_name(nc_sema *sm, nc_expr *e)
 {
@@ -498,10 +569,7 @@ static const nc_type *check_module_name(nc_sema *sm, nc_expr *e)
     case NC_MSYM_STATIC: {
         nc_static_info *st = nc_sema_static(sm, ms);
         if (!st->type || nc_ty_is_error(st->type)) return fail(e);
-        if (!st->is_const) {
-            nc_diag_error(NC_DIAG(sm), e->span, "E9001", "%s", mutable_static_msg);
-            return fail(e);
-        }
+        if (!st->is_const && !nc_sema_require_unsafe(sm, e->span, "accessing a mutable static")) return fail(e);
         e->binding_kind = NC_BIND_STATIC;
         e->binding = st;
         return set_type(e, st->type);
@@ -555,11 +623,7 @@ static const nc_type *field_access(nc_sema *sm, nc_expr *e, const nc_type *bt, b
     nc_aggregate *agg = bt->agg;
     for (uint32_t i = 0; i < agg->nfields; i++) {
         if (agg->fields[i].name != e->u.member.name) continue;
-        if (agg->is_union && reading) {
-            nc_diag_error(NC_DIAG(sm), e->span, "E9001",
-                          "reading a union field requires `unsafe`, which is not implemented in this version (Phase 4)");
-            return fail(e);
-        }
+        if (agg->is_union && reading && !nc_sema_require_unsafe(sm, e->span, "reading a union field")) return fail(e);
         e->binding_kind = NC_BIND_FIELD;
         e->binding = (void *)(uintptr_t)i;
         return set_type(e, agg->fields[i].type);
@@ -592,17 +656,75 @@ static const nc_type *enumerator(nc_sema *sm, nc_expr *e, const nc_type *et)
     return fail(e);
 }
 
+/* The pointee of a pointer about to be accessed through: not void, and
+ * complete. Reports at `span`. */
+static bool pointee_ok(nc_sema *sm, const nc_type *pt, nc_span span, const char *what)
+{
+    if (nc_ty_is_void(pt->elem)) {
+        nc_diag_error(NC_DIAG(sm), span, "E4011", "%s is not possible through '%s': the pointee has no type", what,
+                      nc_type_name(pt));
+        nc_diag_help(NC_DIAG(sm), "convert it first, e.g. `ptr_cast::<u8*>(p)`");
+        return false;
+    }
+    return nc_sema_complete(sm, pt->elem, span);
+}
+
+/* A pointer offset (`p + n`, `p[n]`): `isize` or `usize`; an untyped
+ * constant becomes `isize`. */
+static bool check_offset(nc_sema *sm, nc_expr **slot, const char *what)
+{
+    const nc_type *isize = nc_ty_prim(NC_PRIM_ISIZE), *usize = nc_ty_prim(NC_PRIM_USIZE);
+    nc_check_value(sm, slot, isize);
+    const nc_type *t = (*slot)->type;
+    if (nc_ty_is_error(t)) return false;
+    if (t->kind == NC_TY_UNTYPED_INT) return nc_coerce(sm, slot, isize, what) && !nc_ty_is_error((*slot)->type);
+    if (t == isize || t == usize) return true;
+    nc_diag_error(NC_DIAG(sm), (*slot)->span, "E4001", "%s must have type 'isize' or 'usize', found '%s'", what,
+                  nc_type_name(t));
+    if (nc_ty_is_integer(t)) nc_diag_help(NC_DIAG(sm), "convert it with `isize(...)` or `usize(...)`");
+    fail(*slot);
+    return false;
+}
+
+/* `p->f` where p has type pt. */
+static const nc_type *arrow_access(nc_sema *sm, nc_expr *e, const nc_type *pt, bool reading)
+{
+    if (nc_ty_is_error(pt)) return fail(e);
+    if (!nc_ty_is_ptr(pt)) {
+        nc_diag_error(NC_DIAG(sm), e->u.member.base->span, "E4011", "'->' needs a pointer, found '%s'", nc_type_name(pt));
+        if (nc_ty_is_struct(pt) || nc_ty_is_union(pt)) nc_diag_help(NC_DIAG(sm), "use '.' for a value (D-006)");
+        return fail(e);
+    }
+    if (!pointee_ok(sm, pt, e->u.member.base->span, "member access")) return fail(e);
+    if (!nc_sema_require_unsafe(sm, e->span, "member access through a raw pointer")) return fail(e);
+    return field_access(sm, e, pt->elem, reading);
+}
+
 static const nc_type *check_member(nc_sema *sm, nc_expr *e)
 {
+    if (e->kind == NC_E_ARROW) return arrow_access(sm, e, nc_check_value(sm, &e->u.member.base, NULL), true);
     const nc_type *et = name_as_type(sm, e->u.member.base);
     if (et) return enumerator(sm, e, et);
     const nc_type *bt = nc_check_value(sm, &e->u.member.base, NULL);
+    if (nc_ty_is_ptr(bt)) {
+        nc_diag_error(NC_DIAG(sm), e->span, "E4011", "'.' cannot access a field through the pointer type '%s'",
+                      nc_type_name(bt));
+        nc_diag_help(NC_DIAG(sm), "use '->' (D-006)");
+        return fail(e);
+    }
     return field_access(sm, e, bt, true);
 }
 
-/* `base[index]` where base has type bt. */
+/* `base[index]` where base has type bt: a bounds-checked array element, or
+ * (unsafe) an element through a pointer. */
 static const nc_type *index_access(nc_sema *sm, nc_expr *e, const nc_type *bt)
 {
+    if (nc_ty_is_ptr(bt)) {
+        bool ok = check_offset(sm, &e->u.index.index, "a pointer index");
+        if (!ok || !pointee_ok(sm, bt, e->u.index.base->span, "indexing")) return fail(e);
+        if (!nc_sema_require_unsafe(sm, e->span, "indexing a raw pointer")) return fail(e);
+        return set_type(e, bt->elem);
+    }
     const nc_type *usize = nc_ty_prim(NC_PRIM_USIZE);
     nc_check_value(sm, &e->u.index.index, usize);
     bool ok = nc_coerce(sm, &e->u.index.index, usize, "an array index") && !nc_ty_is_error(e->u.index.index->type);
@@ -621,52 +743,144 @@ static const nc_type *index_access(nc_sema *sm, nc_expr *e, const nc_type *bt)
     return set_type(e, bt->elem);
 }
 
-/* An assignable place: a mutable variable, or a field or element of one.
- * `reading`: the operation also reads the place (compound assignment,
- * `++`). Returns its type, or the error type (reported). */
-static const nc_type *check_place(nc_sema *sm, nc_expr **slot, const char *action, bool reading)
+/* `*p` where p has type pt. */
+static const nc_type *deref(nc_sema *sm, nc_expr *e, const nc_type *pt)
+{
+    if (nc_ty_is_error(pt)) return fail(e);
+    if (!nc_ty_is_ptr(pt)) {
+        nc_diag_error(NC_DIAG(sm), e->span, "E4011", "cannot dereference a value of type '%s'", nc_type_name(pt));
+        return fail(e);
+    }
+    if (!pointee_ok(sm, pt, e->span, "dereferencing")) return fail(e);
+    if (!nc_sema_require_unsafe(sm, e->span, "dereferencing a raw pointer")) return fail(e);
+    return set_type(e, pt->elem);
+}
+
+/* How a place is used. Writes and read-writes need a mutable place; taking
+ * an address (`&x`) does not; `&mut x` does. Only reads and writes of a
+ * mutable static are unsafe, not taking its address. */
+typedef enum place_use { USE_WRITE, USE_READ_WRITE, USE_ADDR, USE_ADDR_MUT } place_use;
+
+typedef struct lvalue {
+    bool is_place;
+    bool immutable;
+    int why;           /* immutable because of: 0 a const variable, 1 a const static, 2 a pointer to const */
+    nc_sym name;
+    nc_span decl_span;
+} lvalue;
+
+static const nc_type *check_lvalue(nc_sema *sm, nc_expr **slot, place_use use, lvalue *lv)
 {
     nc_expr *e = *slot;
-    if (e->kind == NC_E_NAME) {
+    bool reading = use == USE_READ_WRITE;
+    switch (e->kind) {
+    case NC_E_NAME: {
         bool poisoned;
         nc_var *v = nc_scope_use(sm, e->u.name, e->span, &poisoned);
         if (poisoned) return fail(e);
         if (v) {
             e->binding_kind = NC_BIND_VAR;
             e->binding = v;
-            set_type(e, v->type);
-            if (v->is_const) {
-                nc_diag_error(NC_DIAG(sm), e->span, "E4004", "cannot %s immutable variable '%s'", action,
-                              nc_sema_sym(sm, v->name));
-                nc_diag_note(NC_DIAG(sm), v->span, "'%s' is declared `const` here", nc_sema_sym(sm, v->name));
-                return fail(e);
-            }
-            return v->type;
+            *lv = (lvalue){true, v->is_const, 0, v->name, v->span};
+            return set_type(e, v->type);
         }
         nc_module_sym *ms = nc_sema_find_module_sym(sm, e->u.name);
-        if (ms && ms->kind == NC_MSYM_STATIC) {
-            nc_static_info *st = nc_sema_static(sm, ms);
-            if (!st->type || nc_ty_is_error(st->type)) return fail(e);
-            if (st->is_const) {
-                nc_diag_error(NC_DIAG(sm), e->span, "E4004", "cannot %s immutable static '%s'", action,
-                              nc_sema_sym(sm, st->name));
-                nc_diag_note(NC_DIAG(sm), st->span, "'%s' is declared `const` here", nc_sema_sym(sm, st->name));
-            } else {
-                nc_diag_error(NC_DIAG(sm), e->span, "E9001", "%s", mutable_static_msg);
-            }
+        if (!ms || ms->kind != NC_MSYM_STATIC) break;
+        nc_static_info *st = nc_sema_static(sm, ms);
+        if (!st->type || nc_ty_is_error(st->type)) return fail(e);
+        if (!st->is_const && use != USE_ADDR && use != USE_ADDR_MUT &&
+            !nc_sema_require_unsafe(sm, e->span, "accessing a mutable static"))
+            return fail(e);
+        e->binding_kind = NC_BIND_STATIC;
+        e->binding = st;
+        *lv = (lvalue){true, st->is_const, 1, st->name, st->span};
+        return set_type(e, st->type);
+    }
+    case NC_E_MEMBER: {
+        if (name_as_type(sm, e->u.member.base)) break;
+        const nc_type *bt = check_lvalue(sm, &e->u.member.base, use, lv);
+        if (nc_ty_is_ptr(bt)) {
+            nc_diag_error(NC_DIAG(sm), e->span, "E4011", "'.' cannot access a field through the pointer type '%s'",
+                          nc_type_name(bt));
+            nc_diag_help(NC_DIAG(sm), "use '->' (D-006)");
             return fail(e);
         }
-    } else if (e->kind == NC_E_MEMBER && !name_as_type(sm, e->u.member.base)) {
-        const nc_type *bt = check_place(sm, &e->u.member.base, action, reading);
         return field_access(sm, e, bt, reading);
-    } else if (e->kind == NC_E_INDEX) {
-        const nc_type *bt = check_place(sm, &e->u.index.base, action, reading);
+    }
+    case NC_E_ARROW: {
+        const nc_type *pt = nc_check_value(sm, &e->u.member.base, NULL);
+        const nc_type *t = arrow_access(sm, e, pt, reading);
+        if (nc_ty_is_ptr(pt)) *lv = (lvalue){true, pt->pointee_const, 2, 0, NC_NO_SPAN};
+        return t;
+    }
+    case NC_E_INDEX: {
+        /* The base is a place for an array, a value for a pointer. */
+        lvalue base_lv = {0};
+        const nc_type *bt = check_lvalue(sm, &e->u.index.base, use, &base_lv);
+        if (nc_ty_is_ptr(bt)) *lv = (lvalue){true, bt->pointee_const, 2, 0, NC_NO_SPAN};
+        else *lv = base_lv;
         return index_access(sm, e, bt);
     }
-    const nc_type *t = check_expr(sm, slot, NULL);
+    case NC_E_UNARY:
+        if (e->u.unary.op != NC_UN_DEREF) break;
+        {
+            const nc_type *pt = nc_check_value(sm, &e->u.unary.operand, NULL);
+            const nc_type *t = deref(sm, e, pt);
+            if (nc_ty_is_ptr(pt)) *lv = (lvalue){true, pt->pointee_const, 2, 0, NC_NO_SPAN};
+            return t;
+        }
+    default: break;
+    }
+    lv->is_place = false;
+    return check_expr(sm, slot, NULL);
+}
+
+/* An assignable place: a mutable variable or static, a field or element of
+ * one, or a place reached through a pointer to non-const. Returns its
+ * type, or the error type (reported). */
+static const nc_type *check_place(nc_sema *sm, nc_expr **slot, const char *action, place_use use)
+{
+    lvalue lv = {0};
+    const nc_type *t = check_lvalue(sm, slot, use, &lv);
     if (nc_ty_is_error(t)) return t;
-    nc_diag_error(NC_DIAG(sm), (*slot)->span, "E4004", "cannot %s this expression; it is not a variable", action);
-    return fail(*slot);
+    nc_expr *e = *slot;
+    if (!lv.is_place) {
+        nc_diag_error(NC_DIAG(sm), e->span, "E4004", "cannot %s this expression; it is not a variable", action);
+        return fail(e);
+    }
+    if (use == USE_ADDR || !lv.immutable) return t;
+    if (lv.why == 2) {
+        nc_diag_error(NC_DIAG(sm), e->span, "E4004", "cannot %s a place reached through a pointer to const", action);
+        return fail(e);
+    }
+    const char *name = nc_sema_sym(sm, lv.name);
+    nc_diag_error(NC_DIAG(sm), e->span, "E4004", "cannot %s immutable %s '%s'", action, lv.why ? "static" : "variable", name);
+    nc_diag_note(NC_DIAG(sm), lv.decl_span, "'%s' is declared `const` here", name);
+    return fail(e);
+}
+
+/* `&x` of a field of a @packed struct may be misaligned (E5050). */
+static void check_packed_borrow(nc_sema *sm, const nc_expr *operand)
+{
+    uint64_t want = nc_ty_align(operand->type);
+    if (want <= 1) return;
+    for (const nc_expr *e = operand;;) {
+        if ((e->kind == NC_E_MEMBER || e->kind == NC_E_ARROW) && e->binding_kind == NC_BIND_FIELD) {
+            const nc_type *bt = e->kind == NC_E_ARROW ? e->u.member.base->type->elem : e->u.member.base->type;
+            if (nc_ty_is_struct(bt) && bt->agg->packed) {
+                nc_diag_error(NC_DIAG(sm), operand->span, "E5050",
+                              "a pointer to this field of @packed struct '%s' may be misaligned", nc_type_name(bt));
+                nc_diag_help(NC_DIAG(sm), "copy the field to a local variable and take the address of that");
+                return;
+            }
+            if (e->kind == NC_E_ARROW) return;
+            e = e->u.member.base;
+        } else if (e->kind == NC_E_INDEX && nc_ty_is_array(e->u.index.base->type)) {
+            e = e->u.index.base;
+        } else {
+            return;
+        }
+    }
 }
 
 /* ---- sizes ---------------------------------------------------------------------------------- */
@@ -973,7 +1187,7 @@ static const nc_type *check_struct_lit(nc_sema *sm, nc_expr **slot)
 bool nc_is_constant_expr(const nc_expr *e)
 {
     if (!e) return true; /* a zero-initialised member */
-    if (e->cval.kind != NC_CV_NONE) return true;
+    if (e->cval.kind != NC_CV_NONE || e->kind == NC_E_NULL) return true;
     if (e->kind == NC_E_IMPLICIT) return nc_is_constant_expr(e->u.convert.operand);
     if (e->kind != NC_E_AGGREGATE) return false;
     for (uint32_t i = 0; i < e->u.agg.nelems; i++)
@@ -989,14 +1203,35 @@ static const nc_type *check_unary(nc_sema *sm, nc_expr *e, const nc_type *expect
     nc_expr *operand = e->u.unary.operand;
     char buf[64];
     switch (op) {
-    case NC_UN_DEREF: return unsupported(sm, e, "pointer dereference is", 4);
+    case NC_UN_DEREF: return deref(sm, e, nc_check_value(sm, &e->u.unary.operand, NULL));
     case NC_UN_ADDR:
-    case NC_UN_ADDR_MUT: return unsupported(sm, e, "borrowing (`&`, `&mut`) is", 5);
+    case NC_UN_ADDR_MUT: {
+        /* Until references exist (Phase 5), `&x` is only accepted where a raw
+         * pointer is expected, and gives `const T*` (`&mut x`: `T*`). */
+        bool mut = op == NC_UN_ADDR_MUT;
+        if (!expected || !nc_ty_is_ptr(expected)) {
+            unsupported(sm, e, "borrowing (`&`, `&mut`) is", 5);
+            nc_diag_help(NC_DIAG(sm), "`&x` already gives a raw pointer where a pointer type is expected, e.g. `%s p = %s;`",
+                         mut ? "T*" : "const T*", mut ? "&mut x" : "&x");
+            return e->type;
+        }
+        const nc_type *t = check_place(sm, &e->u.unary.operand, mut ? "take a mutable pointer to" : "take the address of",
+                                       mut ? USE_ADDR_MUT : USE_ADDR);
+        if (nc_ty_is_error(t)) return fail(e);
+        check_packed_borrow(sm, e->u.unary.operand);
+        return set_type(e, nc_ty_ptr(sm->s, t, !mut));
+    }
     case NC_UN_TRY: return unsupported(sm, e, "`try` is", 6);
     case NC_UN_PREINC: case NC_UN_PREDEC: case NC_UN_POSTINC: case NC_UN_POSTDEC: {
         bool inc = op == NC_UN_PREINC || op == NC_UN_POSTINC;
-        const nc_type *t = check_place(sm, &e->u.unary.operand, inc ? "increment" : "decrement", true);
+        const nc_type *t = check_place(sm, &e->u.unary.operand, inc ? "increment" : "decrement", USE_READ_WRITE);
         if (nc_ty_is_error(t)) return fail(e);
+        if (nc_ty_is_ptr(t)) {
+            if (!pointee_ok(sm, t, e->span, "pointer arithmetic") ||
+                !nc_sema_require_unsafe(sm, e->span, "pointer arithmetic"))
+                return fail(e);
+            return set_type(e, t);
+        }
         if (!nc_ty_is_numeric(t)) {
             nc_diag_error(NC_DIAG(sm), e->span, "E4011", "operator '%s' cannot be applied to type '%s'",
                           inc ? "++" : "--", nc_type_name(t));
@@ -1099,13 +1334,18 @@ static const nc_type *check_assign(nc_sema *sm, nc_expr *e)
     nc_binop op = e->u.binary.op;
     const char *sp = nc_assignop_spelling(op);
     set_type(e, nc_ty_prim(NC_PRIM_VOID));
-    const nc_type *lt = check_place(sm, &e->u.binary.lhs, "assign to", op != NC_BIN_NONE);
+    const nc_type *lt = check_place(sm, &e->u.binary.lhs, "assign to", op != NC_BIN_NONE ? USE_READ_WRITE : USE_WRITE);
     char what[96];
     if (e->u.binary.lhs->kind == NC_E_NAME)
         snprintf(what, sizeof what, "the assignment to '%s'", nc_sema_sym(sm, e->u.binary.lhs->u.name));
     else
         snprintf(what, sizeof what, "an assignment");
 
+    if (nc_ty_is_ptr(lt) && (op == NC_BIN_ADD || op == NC_BIN_SUB)) {
+        if (check_offset(sm, &e->u.binary.rhs, "a pointer offset") && pointee_ok(sm, lt, e->span, "pointer arithmetic"))
+            nc_sema_require_unsafe(sm, e->span, "pointer arithmetic");
+        return e->type;
+    }
     if (op == NC_BIN_SHL || op == NC_BIN_SHR) {
         bool ok = check_shift_amount(sm, &e->u.binary.rhs);
         if (ok && !nc_ty_is_error(lt) && !nc_ty_is_integer(lt))
@@ -1135,10 +1375,88 @@ static const nc_type *check_assign(nc_sema *sm, nc_expr *e)
 
 static const nc_type *check_convert(nc_sema *sm, nc_expr *e);
 
+/* Is `name` a builtin here, i.e. not shadowed by a local or module item? */
+static bool is_builtin_name(nc_sema *sm, const nc_expr *e, const char *name)
+{
+    return e->kind == NC_E_NAME && strcmp(nc_sema_sym(sm, e->u.name), name) == 0 && !nc_scope_lookup(sm, e->u.name) &&
+           !nc_sema_find_module_sym(sm, e->u.name);
+}
+
+/* addr(p), ptr_cast::<U*>(p), ptr_cast_mut::<U*>(p), ptr_from_addr::<T>(a)
+ * (NOVAC_TYPE_SYSTEM.md §5.3). Returns NULL if the call is not one. */
+static const nc_type *check_builtin_call(nc_sema *sm, nc_expr *e)
+{
+    nc_expr *callee = e->u.call.callee;
+    nc_expr *base = callee->kind == NC_E_GENERIC ? callee->u.generic.base : callee;
+    static const char *const names[] = {"addr", "ptr_cast", "ptr_cast_mut", "ptr_from_addr"};
+    int kind = -1;
+    for (int k = 0; k < 4; k++)
+        if (is_builtin_name(sm, base, names[k])) kind = k;
+    if (kind < 0) return NULL;
+    const char *name = names[kind];
+    bool generic = kind != NC_BUILTIN_ADDR;
+    nc_type_expr *te = NULL;
+    if (generic) {
+        if (callee->kind != NC_E_GENERIC || callee->u.generic.nargs != 1 || !callee->u.generic.args[0].type) {
+            nc_diag_error(NC_DIAG(sm), callee->span, "E4002", "'%s' takes one type argument: `%s::<T>(...)`", name, name);
+            return fail(e);
+        }
+        te = callee->u.generic.args[0].type;
+    } else if (callee->kind == NC_E_GENERIC) {
+        nc_diag_error(NC_DIAG(sm), callee->span, "E4002", "'addr' takes no type argument");
+        return fail(e);
+    }
+    if (e->u.call.nargs != 1) {
+        nc_diag_error(NC_DIAG(sm), e->span, "E4002", "'%s' takes exactly one argument", name);
+        for (uint32_t i = 0; i < e->u.call.nargs; i++) nc_check_value(sm, &e->u.call.args[i], NULL);
+        return fail(e);
+    }
+    nc_expr *arg = e->u.call.args[0];
+    const nc_type *target = NULL;
+    if (te) {
+        bool c;
+        target = nc_sema_resolve_type(sm, te, &c);
+        if (nc_ty_is_error(target)) return fail(e);
+    }
+    e->kind = NC_E_BUILTIN;
+    e->u.builtin.kind = (nc_builtin)kind;
+    e->u.builtin.type = te;
+    e->u.builtin.operand = arg;
+    nc_expr **slot = &e->u.builtin.operand;
+    if (kind == NC_BUILTIN_PTR_FROM_ADDR) {
+        const nc_type *usize = nc_ty_prim(NC_PRIM_USIZE);
+        nc_check_value(sm, slot, usize);
+        if (!nc_coerce(sm, slot, usize, "the argument of 'ptr_from_addr'") || nc_ty_is_error((*slot)->type)) return fail(e);
+        if (!nc_sema_require_unsafe(sm, e->span, "'ptr_from_addr'")) return fail(e);
+        return set_type(e, nc_ty_ptr(sm->s, target, false));
+    }
+    const nc_type *from = nc_check_value(sm, slot, NULL);
+    if (nc_ty_is_error(from)) return fail(e);
+    if (!nc_ty_is_ptr(from)) {
+        nc_diag_error(NC_DIAG(sm), (*slot)->span, "E4001", "the argument of '%s' must be a pointer, found '%s'", name,
+                      nc_type_name(from));
+        return fail(e);
+    }
+    if (kind == NC_BUILTIN_ADDR) return set_type(e, nc_ty_prim(NC_PRIM_USIZE));
+    if (!nc_ty_is_ptr(target)) {
+        nc_diag_error(NC_DIAG(sm), te->span, "E4007", "'%s' converts to a pointer type, not '%s'", name, nc_type_name(target));
+        return fail(e);
+    }
+    if (kind == NC_BUILTIN_PTR_CAST && from->pointee_const && !target->pointee_const) {
+        nc_diag_error(NC_DIAG(sm), e->span, "E4007", "'ptr_cast' cannot remove `const` from '%s'", nc_type_name(from));
+        nc_diag_help(NC_DIAG(sm), "`ptr_cast_mut` can, in unsafe code");
+        return fail(e);
+    }
+    if (kind == NC_BUILTIN_PTR_CAST_MUT && !nc_sema_require_unsafe(sm, e->span, "'ptr_cast_mut'")) return fail(e);
+    return set_type(e, target);
+}
+
 static const nc_type *check_call(nc_sema *sm, nc_expr *e)
 {
     nc_expr *callee = e->u.call.callee;
     nc_fn_info *fn = NULL;
+    const nc_type *bt = check_builtin_call(sm, e);
+    if (bt) return bt;
     if (name_as_type(sm, callee)) {
         /* `Color(x)`, `Vec2(p)`: a conversion to a named type, which the
          * parser cannot tell from a call. */
@@ -1210,6 +1528,11 @@ static const nc_type *check_call(nc_sema *sm, nc_expr *e)
         }
     }
     if (!fn) return fail(e);
+    if (fn->decl->u.fn.is_unsafe) {
+        char what[96];
+        snprintf(what, sizeof what, "calling the unsafe function '%s'", nc_sema_sym(sm, fn->decl->u.fn.name));
+        if (!nc_sema_require_unsafe(sm, e->span, what)) return fail(e);
+    }
     return set_type(e, fn->ret);
 }
 
@@ -1241,6 +1564,8 @@ static const nc_type *check_convert(nc_sema *sm, nc_expr *e)
         nc_diag_error(NC_DIAG(sm), e->span, "E4007", "cannot convert '%s' to '%s'", nc_type_name(from), nc_type_name(to));
         if (nc_ty_is_bool(to)) nc_diag_help(NC_DIAG(sm), "compare instead, e.g. `x != 0`");
         else if (to_enum && from_enum) nc_diag_help(NC_DIAG(sm), "convert through the underlying integer type");
+        else if (nc_ty_is_ptr(from) && nc_ty_is_integer(to)) nc_diag_help(NC_DIAG(sm), "use `addr(p)` for the address");
+        else if (nc_ty_is_ptr(to)) nc_diag_help(NC_DIAG(sm), "use `ptr_cast::<%s>(p)` or `ptr_from_addr::<T>(a)`", nc_type_name(to));
         return fail(e);
     }
     set_type(e, to);
@@ -1344,18 +1669,19 @@ static const nc_type *check_expr(nc_sema *sm, nc_expr **slot, const nc_type *exp
         return set_type(e, nc_ty_prim(NC_PRIM_U8));
     case NC_E_STRING: return unsupported(sm, e, "string literals are", 6);
     case NC_E_CSTRING: return unsupported(sm, e, "C string literals are", 4);
-    case NC_E_NULL: return unsupported(sm, e, "`null` (raw pointers) is", 4);
+    case NC_E_NULL: return set_type(e, nc_ty_null());
     case NC_E_NONE: return unsupported(sm, e, "`none` (optional types) is", 6);
     case NC_E_SOME: return unsupported(sm, e, "`some` (optional types) is", 6);
     case NC_E_SELF: return unsupported(sm, e, "`self` is", 5);
     case NC_E_INDEX: return index_access(sm, e, nc_check_value(sm, &e->u.index.base, NULL));
     case NC_E_MEMBER: return check_member(sm, e);
-    case NC_E_ARROW: return unsupported(sm, e, "member access through pointers is", 4);
+    case NC_E_ARROW: return check_member(sm, e);
     case NC_E_STRUCT_LIT: return check_struct_lit(sm, slot);
     case NC_E_SIZEOF:
     case NC_E_ALIGNOF: return check_size(sm, e);
     case NC_E_OFFSETOF: return check_offsetof(sm, e);
-    case NC_E_AGGREGATE: return e->type;
+    case NC_E_AGGREGATE:
+    case NC_E_BUILTIN: return e->type;
     case NC_E_GENERIC: return unsupported(sm, e, "explicit generic arguments are", 6);
     case NC_E_IS: return unsupported(sm, e, "`is` patterns are", 6);
     }

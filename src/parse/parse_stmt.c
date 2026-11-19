@@ -84,9 +84,6 @@ static nc_stmt *unsupported(nc_parser *p, const char *what, int phase)
     s->u.unsupported = what;
     nc_p_recoverable(p, t->span, "E9001", "'%s' is not implemented in this version (Phase %d)", what, phase);
     switch (t->kind) {
-    case NC_T_KW_UNSAFE:
-        if (nc_p_at(p, NC_T_LBRACE)) nc_parse_block(p);
-        break;
     case NC_T_KW_DEFER:
         nc_parse_stmt(p);
         break;
@@ -304,7 +301,19 @@ nc_stmt *nc_parse_stmt(nc_parser *p)
         s = nc_p_stmt(p, NC_S_FALLTHROUGH, t->span);
         nc_p_expect(p, NC_T_SEMI, "';'");
         break;
-    case NC_T_KW_UNSAFE: return unsupported(p, "unsafe", 4);
+    case NC_T_KW_UNSAFE: {
+        /* unsafe { ... } (NOVAC_MEMORY_MODEL.md §2) */
+        const nc_token *kw = nc_p_advance(p);
+        nc_stmt *us = nc_p_stmt(p, NC_S_UNSAFE, kw->span);
+        if (!nc_p_at(p, NC_T_LBRACE)) {
+            nc_p_expected(p, "'{' after 'unsafe'");
+            us->kind = NC_S_EMPTY;
+            return us;
+        }
+        us->u.unsafe_body = nc_parse_block(p);
+        us->span = nc_span_join(kw->span, nc_p_prev(p)->span);
+        return us;
+    }
     case NC_T_KW_DEFER: return unsupported(p, "defer", 6);
     case NC_T_KW_ASM: return unsupported(p, "asm", 7);
     case NC_T_KW_GOTO:

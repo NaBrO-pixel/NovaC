@@ -319,7 +319,13 @@ static LLVMValueRef place_addr(cg *g, const nc_place *p, bool *misaligned)
     const nc_type *t = nc_nir_place_base_type(g->m, g->f, p);
     for (uint32_t i = 0; i < p->nprojs; i++) {
         const nc_proj *pr = &p->projs[i];
-        if (pr->kind == NC_PROJ_FIELD) {
+        if (pr->kind == NC_PROJ_DEREF) {
+            /* Load the pointer; its pointee is assumed aligned (NOVAC_MEMORY_MODEL.md §6.2). */
+            LLVMValueRef ld = LLVMBuildLoad2(g->b, g->ptr_ty, addr, "");
+            if (*misaligned) LLVMSetAlignment(ld, 1);
+            addr = ld;
+            *misaligned = false;
+        } else if (pr->kind == NC_PROJ_FIELD) {
             if (nc_ty_is_struct(t) && t->agg->packed) *misaligned = true;
             if (nc_ty_is_struct(t)) addr = LLVMBuildStructGEP2(g->b, llvm_type(g, t), addr, pr->field, "");
             /* a union's fields all start at its address */
@@ -340,6 +346,7 @@ static LLVMValueRef operand(cg *g, const nc_operand *o)
     switch (o->kind) {
     case NC_OP_CONST: return const_value(g, o->cval, o->type);
     case NC_OP_ZERO: return LLVMConstNull(llvm_type(g, o->type));
+    case NC_OP_UNDEF: return LLVMGetUndef(llvm_type(g, o->type));
     case NC_OP_COPY: break;
     }
     bool misaligned;
@@ -367,6 +374,7 @@ static LLVMValueRef operand_addr(cg *g, const nc_operand *o);
  * stores element by element, which is slow for large arrays. */
 static void store_operand(cg *g, const nc_operand *o, LLVMValueRef addr, bool misaligned, const nc_type *t)
 {
+    if (o->kind == NC_OP_UNDEF) return; /* `uninit`: leave the storage as it is */
     if (nc_ty_is_aggregate(t) && o->kind != NC_OP_CONST) {
         unsigned align = misaligned ? 1 : (unsigned)nc_ty_align(t);
         LLVMValueRef size = LLVMConstInt(g->i64_ty, nc_ty_size(t), 0);
@@ -495,6 +503,8 @@ static LLVMValueRef cast(cg *g, nc_cast_kind k, const nc_operand *oa, const nc_t
         return to->prim == NC_PRIM_F64 ? LLVMBuildFPExt(g->b, a, ty, "") : LLVMBuildFPTrunc(g->b, a, ty, "");
     case NC_CAST_BOOL_TO_INT: return LLVMBuildZExt(g->b, a, ty, "");
     case NC_CAST_NOP: return a;
+    case NC_CAST_PTR_TO_INT: return LLVMBuildPtrToInt(g->b, a, ty, "");
+    case NC_CAST_INT_TO_PTR: return LLVMBuildIntToPtr(g->b, a, ty, "");
     }
     nc_ice("codegen", "invalid cast");
 }
@@ -531,6 +541,7 @@ static void gen_stmt(cg *g, const nc_nir_stmt *st)
                 store_operand(g, &st->rv.a, addr, misaligned, dt);
                 return;
             }
+            if (st->rv.a.kind == NC_OP_UNDEF) return;
             v = operand(g, &st->rv.a);
             break;
         case NC_RV_BINARY: v = binary(g, st->rv.binop, &st->rv.a, &st->rv.b); break;
@@ -541,6 +552,27 @@ static void gen_stmt(cg *g, const nc_nir_stmt *st)
             break;
         }
         case NC_RV_CAST: v = cast(g, st->rv.cast, &st->rv.a, dt); break;
+        case NC_RV_ADDR: {
+            bool unused;
+            v = place_addr(g, &st->rv.a.place, &unused);
+            break;
+        }
+        case NC_RV_PTR_OFFSET: {
+            /* Plain (wrapping) GEP: no inbounds assumption is made. */
+            LLVMValueRef p = operand(g, &st->rv.a), n = operand(g, &st->rv.b);
+            if (st->rv.binop == NC_NB_SUB) n = LLVMBuildNeg(g->b, n, "");
+            v = LLVMBuildGEP2(g->b, llvm_type(g, st->rv.a.type->elem), p, &n, 1, "");
+            break;
+        }
+        case NC_RV_PTR_DIFF: {
+            /* Not LLVMBuildPtrDiff2, whose exact division is poison for a
+             * difference that is not a multiple of the element size. */
+            LLVMValueRef a = LLVMBuildPtrToInt(g->b, operand(g, &st->rv.a), g->i64_ty, "");
+            LLVMValueRef b = LLVMBuildPtrToInt(g->b, operand(g, &st->rv.b), g->i64_ty, "");
+            LLVMValueRef size = LLVMConstInt(g->i64_ty, nc_ty_size(st->rv.a.type->elem), 0);
+            v = LLVMBuildSDiv(g->b, LLVMBuildSub(g->b, a, b, ""), size, "");
+            break;
+        }
         case NC_RV_AGGREGATE: {
             bool misaligned;
             LLVMValueRef addr = place_addr(g, &st->dest, &misaligned);
@@ -681,7 +713,7 @@ static bool has_union(const nc_type *t)
 /* The bytes of a constant (all version-1 targets are little-endian). */
 static void const_bytes(const nc_expr *e, const nc_type *t, uint8_t *buf)
 {
-    if (!e) return; /* zero */
+    if (!e || e->kind == NC_E_NULL) return; /* zero */
     if (e->cval.kind != NC_CV_NONE) {
         uint64_t bits;
         nc_cval v = e->cval;
@@ -718,7 +750,7 @@ static void const_bytes(const nc_expr *e, const nc_type *t, uint8_t *buf)
 static LLVMValueRef const_init(cg *g, const nc_expr *e, const nc_type *t)
 {
     LLVMTypeRef ty = llvm_type(g, t);
-    if (!e) return LLVMConstNull(ty);
+    if (!e || e->kind == NC_E_NULL) return LLVMConstNull(ty);
     if (e->cval.kind != NC_CV_NONE) return const_value(g, e->cval, t);
     if (e->kind == NC_E_IMPLICIT) return const_init(g, e->u.convert.operand, t);
     if (e->kind != NC_E_AGGREGATE) nc_ice("codegen", "static initialiser is not constant");

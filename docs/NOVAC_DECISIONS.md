@@ -743,6 +743,33 @@ C code that relies on `= {0}` translates directly. Field-by-field
 initialisation after a bare declaration remains an error (E5031): write
 `= {}` first.
 
+## D-044 — Until Phase 5, `&x` is a raw pointer, and only where one is expected
+
+**Status:** Accepted (Phase 4)
+
+**Context.** C interoperability (Phase 4) needs addresses of locals,
+fields and statics. In the final language `&x` is a reference, which
+coerces to a raw pointer (NOVAC_TYPE_SYSTEM.md §5.1); references and the
+borrow checker arrive in Phase 5. The alternatives:
+
+1. Give `&x` the type `const T*` now: `auto p = &x;` would then change type
+   when references arrive.
+2. A separate address-of operator or builtin (`addr_of(x)`): new syntax
+   that Phase 5 would make redundant.
+3. Accept `&x` only where the expected type is a raw pointer
+   (initialisers, assignments, arguments, returns, comparison with a
+   pointer), with the result `const T*` (`&mut x`: `T*`).
+
+**Decision.** Option 3. Every program accepted now keeps its meaning when
+`&x` becomes a reference that coerces to a pointer. Elsewhere `&x` is
+E9001 (Phase 5). Taking an address is safe, including of a mutable static;
+dereferencing is unsafe.
+
+**Consequences.** Pointers made this way carry no lifetime: a pointer to a
+local outlives it without a diagnostic, and using it then is undefined
+behaviour of the unsafe code that dereferences it, as in Rust's raw
+pointers.
+
 ---
 
 ## Outstanding questions

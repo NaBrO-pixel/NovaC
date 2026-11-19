@@ -6,6 +6,21 @@ released versions yet.
 
 ## [Unreleased]
 
+### Added — Phase 4b: raw pointers, `unsafe` and modes
+
+- Raw pointers `T*` and `const T*`, `null`, dereference, `->`, indexing
+  and arithmetic through pointers (wrapping), pointer differences,
+  comparisons, and `addr`, `ptr_cast`, `ptr_cast_mut`, `ptr_from_addr`.
+- `&x` / `&mut x` give raw pointers where a pointer is expected (D-044);
+  pointers into `@packed` structs are rejected (E5050).
+- `@mode(safe|controlled|kernel)` on the module, `unsafe { }` blocks and
+  `unsafe` functions; every unsafe operation outside an unsafe context is
+  E6003, unsafe code in a safe module E6001. Union reads, mutable statics
+  and `uninit` work in unsafe code.
+- `--max-mode=` (E6004).
+- NIR: dereference projections, address-of, pointer offset and
+  difference rvalues, pointer casts, `uninit` operands.
+
 ### Added — Phase 4a: aggregates, enums and `switch`
 
 - Structs (C layout, `@packed`, `@repr(C)`, opaque `struct Name;`), unions,

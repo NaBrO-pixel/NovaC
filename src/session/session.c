@@ -7,6 +7,7 @@ void nc_session_init(nc_session *s, FILE *diag_out)
     nc_arena_init(&s->arena);
     nc_diag_init(&s->diag, &s->sources, diag_out);
     s->types = NULL;
+    s->max_mode = 2; /* no limit */
 }
 
 void nc_session_free(nc_session *s)

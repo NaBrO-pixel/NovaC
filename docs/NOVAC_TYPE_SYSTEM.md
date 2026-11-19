@@ -192,8 +192,26 @@ Nullable, unchecked addresses with no lifetime. Creating, copying,
 comparing and converting raw pointers is safe. **Dereferencing**, pointer
 arithmetic (`p + n`, `p[n]`), and converting a raw pointer to a reference
 are unsafe operations (NOVAC_MEMORY_MODEL.md §6). `null` has every raw
-pointer type. Comparison `<`/`>` between pointers is permitted and defined
-as address comparison.
+pointer type, and its type cannot be inferred (`auto p = null` is E4001).
+Comparison `<`/`>` between pointers is permitted and defined as address
+comparison; `T*` and `const T*` operands meet at `const T*`.
+
+- `p + n`, `p - n`, `p[n]`: `n` is `isize` or `usize` (an untyped
+  constant is `isize`); the address moves by whole elements and wraps
+  rather than being undefined. `p - q` is the element distance as
+  `isize`. None of them works on `void*` or, for `p - q`, on a zero-sized
+  pointee (E4011).
+- `p->f` accesses a field through a pointer; `.` on a pointer is E4011
+  (D-006). Writing through a `const T*` is E4004.
+- `T*` converts implicitly to `const T*`; nothing else converts
+  implicitly. `ptr_cast::<U*>(p)` changes the pointee (keeping `const`),
+  `ptr_cast_mut` may also remove it (unsafe), `addr(p)` gives the address
+  as `usize`, `ptr_from_addr::<T>(a)` makes a `T*` (unsafe). `usize(p)` is
+  E4007.
+- Until references arrive (Phase 5), `&x` and `&mut x` are accepted only
+  where a raw pointer is expected and give `const T*` and `T*` (D-044).
+  `&mut` needs a mutable place (E4004); a field of a `@packed` struct
+  with alignment above 1 cannot be pointed to (E5050).
 
 ### 3.7 References: `T&`, `const T&`
 

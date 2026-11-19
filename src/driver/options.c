@@ -12,7 +12,6 @@ static const struct {
     int phase;
 } future_options[] = {
     {"--freestanding", false, false, 7},
-    {"--max-mode=", true, false, 4},
     {"--module-path=", true, false, 6},
     {"--feature=", true, false, 6},
     {"-T", false, true, 7},
@@ -48,6 +47,7 @@ void nc_print_help(FILE *out)
           "  -mcpu=<cpu>, -mattr=<features>   CPU and features beyond the baseline\n"
           "  --linker=<command>    linker driver (default: cc, or <triple>-gcc when cross-compiling)\n"
           "  -fpanic=verbose|minimal   panic messages with or without text and file name\n"
+          "  --max-mode=safe|controlled|kernel   reject modules with a higher @mode\n"
           "\n"
           "Diagnostics:\n"
           "  -Werror               treat warnings as errors\n"
@@ -106,6 +106,7 @@ bool nc_parse_options(int argc, char **argv, nc_options *o, nc_diag *d)
 {
     memset(o, 0, sizeof *o);
     o->error_limit = 50;
+    o->max_mode = 2;
     o->opt = '0';
     o->target = nc_target_host();
     o->inputs = calloc((size_t)(argc > 0 ? argc : 1), sizeof *o->inputs);
@@ -195,6 +196,15 @@ bool nc_parse_options(int argc, char **argv, nc_options *o, nc_diag *d)
             else if (strcmp(a + 8, "minimal") == 0) o->panic_minimal = true;
             else {
                 nc_diag_error(d, NC_NO_SPAN, "E0003", "invalid value '%s' for -fpanic", a + 8);
+                ok = false;
+            }
+        } else if (strncmp(a, "--max-mode=", 11) == 0) {
+            const char *v = a + 11;
+            if (strcmp(v, "safe") == 0) o->max_mode = 0;
+            else if (strcmp(v, "controlled") == 0) o->max_mode = 1;
+            else if (strcmp(v, "kernel") == 0) o->max_mode = 2;
+            else {
+                nc_diag_error(d, NC_NO_SPAN, "E0003", "invalid value '%s' for --max-mode", v);
                 ok = false;
             }
         } else if (strcmp(a, "-Werror") == 0) {

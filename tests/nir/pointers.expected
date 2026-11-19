@@ -1,0 +1,43 @@
+module pointers
+
+fn get(_0: S*, _1: i32*, _2: usize) -> i32 {
+    let _3: i32; // r
+    let _4: i32*;
+    let _5: i32;
+    let _6: bool;
+    let _7: i32*;
+    let _8: i32;
+    let _9: bool;
+    let _10: i32*;
+  bb0:
+    _3 = const 0i32
+    _4 = ptr_add(_1, _2)
+    (_5, _6) = checked_add(_0.*.next.*.v, _4.*)
+    assert !_6, "integer overflow in '+'" -> bb1
+  bb1:
+    _7 = ptr_add(_1, const 1isize)
+    (_8, _9) = checked_add(_5, _7.*)
+    assert !_9, "integer overflow in '+'" -> bb2
+  bb2:
+    _3 = _8
+    _1.* = _3
+    _10 = _1
+    _1 = ptr_add(_1, const 1isize)
+    return _3
+}
+
+fn locate(_0: S) -> usize {
+    let _1: const S*;
+    let _2: const S*; // q
+    let _3: usize;
+    let _4: usize;
+    let _5: bool;
+  bb0:
+    _1 = addr(_0)
+    _2 = _1
+    _3 = ptr_to_int(_2 as usize)
+    (_4, _5) = checked_add(_3, const 16usize)
+    assert !_5, "integer overflow in '+'" -> bb1
+  bb1:
+    return _4
+}

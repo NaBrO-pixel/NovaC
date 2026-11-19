@@ -13,6 +13,15 @@ void nc_sema_print_type(FILE *out, const nc_type *t)
     nc_type_print(out, t);
 }
 
+bool nc_sema_require_unsafe(nc_sema *sm, nc_span span, const char *what)
+{
+    if (sm->unsafe_depth || (sm->cur_fn && sm->cur_fn->decl->u.fn.is_unsafe)) return true;
+    nc_diag_error(NC_DIAG(sm), span, "E6003", "%s requires an `unsafe` block or function", what);
+    if (sm->mode == NC_MODE_SAFE)
+        nc_diag_help(NC_DIAG(sm), "unsafe code needs a `@mode(controlled)` module (NOVAC_MEMORY_MODEL.md §2)");
+    return false;
+}
+
 /* ---- scopes -------------------------------------------------------------------------------- */
 
 void nc_scope_push(nc_sema *sm)
@@ -111,7 +120,12 @@ static void check_var_decl(nc_sema *sm, nc_stmt *s)
         char what[96];
         snprintf(what, sizeof what, "the initialiser of '%s'", name);
         if (d->init && d->init->kind == NC_INIT_UNINIT) {
-            nc_diag_error(NC_DIAG(sm), d->init->span, "E9001", "`uninit` is not implemented in this version (Phase 4)");
+            /* Storage the analysis treats as initialised (NOVAC_MEMORY_MODEL.md §5). */
+            nc_sema_require_unsafe(sm, d->init->span, "`uninit`");
+            if (!t) {
+                nc_diag_error(NC_DIAG(sm), d->span, "E4064", "'auto' variable '%s' needs an initialiser to infer its type", name);
+                t = nc_ty_error();
+            }
         } else if (d->init && t) {
             nc_sema_check_init(sm, d->init, t, what);
         } else if (d->init && d->init->kind == NC_INIT_LIST) {
@@ -365,6 +379,16 @@ bool nc_check_stmt(nc_sema *sm, nc_stmt *s)
     }
     case NC_S_SWITCH:
         return check_switch(sm, s);
+    case NC_S_UNSAFE: {
+        if (sm->mode == NC_MODE_SAFE) {
+            nc_diag_error(NC_DIAG(sm), s->span, "E6001", "`unsafe` blocks are not allowed in a safe module");
+            nc_diag_help(NC_DIAG(sm), "declare the module `@mode(controlled) module name;` (NOVAC_MEMORY_MODEL.md §2)");
+        }
+        sm->unsafe_depth++; /* checked as unsafe even after E6001, to avoid follow-on errors */
+        bool term = check_sub(sm, s->u.unsafe_body);
+        sm->unsafe_depth--;
+        return term;
+    }
     case NC_S_FALLTHROUGH:
         if (!fallthrough_ok) {
             nc_diag_error(NC_DIAG(sm), s->span, "E2051",
@@ -409,8 +433,10 @@ static nc_fn_info *declare_function(nc_sema *sm, nc_decl *d)
     nc_sema_attrs(sm, d->attrs, d->nattrs, 0);
     if (d->u.fn.has_extern)
         nc_diag_error(NC_DIAG(sm), d->span, "E9001", "`extern` functions are not implemented in this version (Phase 4)");
-    if (d->u.fn.is_unsafe)
-        nc_diag_error(NC_DIAG(sm), d->span, "E9001", "`unsafe` functions are not implemented in this version (Phase 4)");
+    if (d->u.fn.is_unsafe && sm->mode == NC_MODE_SAFE) {
+        nc_diag_error(NC_DIAG(sm), d->u.fn.name_span, "E6001", "`unsafe` functions are not allowed in a safe module");
+        nc_diag_help(NC_DIAG(sm), "declare the module `@mode(controlled) module name;` (NOVAC_MEMORY_MODEL.md §2)");
+    }
     if (d->u.fn.ngeneric)
         nc_diag_error(NC_DIAG(sm), d->u.fn.generic_span, "E9001", "generic functions are not implemented in this version (Phase 6)");
     if (d->u.fn.variadic)
@@ -478,7 +504,12 @@ bool nc_sema_check(nc_session *s, nc_module_ast *m)
     sm.m = m;
     unsigned errors_before = s->diag.errors;
 
-    nc_sema_attrs(&sm, m->attrs, m->nattrs, 0);
+    nc_sema_attrs(&sm, m->attrs, m->nattrs, NC_ATTR_MODE);
+    if ((unsigned)sm.mode > s->max_mode) {
+        static const char *const names[] = {"safe", "controlled", "kernel"};
+        nc_diag_error(&s->diag, m->name.span, "E6004", "module mode '%s' exceeds the limit --max-mode=%s", names[sm.mode],
+                      names[s->max_mode]);
+    }
     nc_sema_collect(&sm);
 
     /* Signatures first, so that every function can be called from anywhere;

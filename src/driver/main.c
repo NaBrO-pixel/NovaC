@@ -143,6 +143,7 @@ int main(int argc, char **argv)
     } else {
         s.diag.werror = opts.werror;
         s.diag.error_limit = opts.error_limit;
+        s.max_mode = opts.max_mode;
         ok = compile(&s, &opts);
         status = ok && !s.diag.errors ? 0 : 1;
     }

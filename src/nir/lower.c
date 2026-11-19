@@ -293,6 +293,18 @@ static nc_operand lower_binop(lowerer *lx, nc_binop op, nc_operand a, nc_operand
     const nc_type *t = a.type; /* operand type */
     bool is_int = nc_ty_is_integer(t);
     nc_nir_binop nb;
+    if (nc_ty_is_ptr(t) && (op == NC_BIN_ADD || op == NC_BIN_SUB)) {
+        nc_rvalue prv = {0};
+        prv.kind = nc_ty_is_ptr(b.type) ? NC_RV_PTR_DIFF : NC_RV_PTR_OFFSET;
+        prv.binop = op == NC_BIN_ADD ? NC_NB_ADD : NC_NB_SUB;
+        prv.a = a;
+        prv.b = b;
+        if (dest) {
+            assign_place(lx, *dest, prv, span);
+            return op_place(*dest, span);
+        }
+        return emit_rv(lx, result, prv, span);
+    }
     switch (op) {
     case NC_BIN_ADD: case NC_BIN_SUB: case NC_BIN_MUL:
         nb = op == NC_BIN_ADD ? NC_NB_ADD : op == NC_BIN_SUB ? NC_NB_SUB : NC_NB_MUL;
@@ -519,12 +531,21 @@ static nc_place project(lowerer *lx, nc_place base, nc_proj pr)
 
 static nc_place lower_place(lowerer *lx, nc_expr *e);
 
+static nc_place deref_place(lowerer *lx, nc_place ptr, const nc_type *pointee)
+{
+    nc_proj pr = {0};
+    pr.kind = NC_PROJ_DEREF;
+    pr.type = pointee;
+    return project(lx, ptr, pr);
+}
+
 /* A place for `e`: `e` itself if it denotes one, else a temporary holding
  * its value (`f().x`). */
 static nc_place place_of(lowerer *lx, nc_expr *e)
 {
     bool is_place = (e->kind == NC_E_NAME && (e->binding_kind == NC_BIND_VAR || e->binding_kind == NC_BIND_STATIC)) ||
-                    (e->kind == NC_E_MEMBER && e->binding_kind == NC_BIND_FIELD) || e->kind == NC_E_INDEX;
+                    ((e->kind == NC_E_MEMBER || e->kind == NC_E_ARROW) && e->binding_kind == NC_BIND_FIELD) ||
+                    e->kind == NC_E_INDEX || (e->kind == NC_E_UNARY && e->u.unary.op == NC_UN_DEREF);
     if (is_place && e->cval.kind == NC_CV_NONE) return lower_place(lx, e);
     nc_operand v = lower_expr(lx, e);
     if (v.kind == NC_OP_COPY && v.place.base == NC_PLACE_LOCAL && !lx->fn->locals[v.place.id].is_user) return v.place;
@@ -546,6 +567,16 @@ static nc_place lower_place(lowerer *lx, nc_expr *e)
             return p;
         }
         break;
+    case NC_E_UNARY: /* *p */
+        return deref_place(lx, place_of(lx, e->u.unary.operand), e->type);
+    case NC_E_ARROW: {
+        nc_place base = deref_place(lx, place_of(lx, e->u.member.base), e->u.member.base->type->elem);
+        nc_proj pr = {0};
+        pr.kind = NC_PROJ_FIELD;
+        pr.field = (uint32_t)(uintptr_t)e->binding;
+        pr.type = e->type;
+        return project(lx, base, pr);
+    }
     case NC_E_MEMBER: {
         nc_place base = place_of(lx, e->u.member.base);
         nc_proj pr = {0};
@@ -555,6 +586,17 @@ static nc_place lower_place(lowerer *lx, nc_expr *e)
         return project(lx, base, pr);
     }
     case NC_E_INDEX: {
+        if (nc_ty_is_ptr(e->u.index.base->type)) { /* p[i] is *(p + i): unchecked */
+            nc_operand p = lower_expr(lx, e->u.index.base);
+            nc_operand i = lower_expr(lx, e->u.index.index);
+            nc_rvalue rv = {0};
+            rv.kind = NC_RV_PTR_OFFSET;
+            rv.binop = NC_NB_ADD;
+            rv.a = p;
+            rv.b = i;
+            nc_operand q = emit_rv(lx, p.type, rv, e->span);
+            return deref_place(lx, q.place, e->type);
+        }
         nc_place base = place_of(lx, e->u.index.base);
         nc_operand ix = lower_expr(lx, e->u.index.index);
         nc_proj pr = {0};
@@ -627,7 +669,14 @@ static nc_operand lower_unary(lowerer *lx, nc_expr *e)
             use.a = cur;
             old = emit_rv(lx, t, use, e->span);
         }
-        if (nc_ty_is_integer(t)) {
+        if (nc_ty_is_ptr(t)) {
+            nc_rvalue rv = {0};
+            rv.kind = NC_RV_PTR_OFFSET;
+            rv.binop = inc ? NC_NB_ADD : NC_NB_SUB;
+            rv.a = cur;
+            rv.b = op_int(1, nc_ty_prim(NC_PRIM_ISIZE), e->span);
+            assign_place(lx, v, rv, e->span);
+        } else if (nc_ty_is_integer(t)) {
             emit_checked(lx, inc ? NC_NB_ADD : NC_NB_SUB, cur, op_int(1, t, e->span), t, &v,
                          inc ? "integer overflow in '++'" : "integer overflow in '--'", e->span);
         } else {
@@ -720,9 +769,26 @@ static nc_operand lower_expr(lowerer *lx, nc_expr *e)
     switch (e->kind) {
     case NC_E_NAME:
     case NC_E_MEMBER:
+    case NC_E_ARROW:
     case NC_E_INDEX: return op_place(lower_place(lx, e), e->span);
+    case NC_E_NULL: return op_zero(e->type, e->span);
+    case NC_E_BUILTIN: {
+        nc_operand x = lower_expr(lx, e->u.builtin.operand);
+        nc_cast_kind k = e->u.builtin.kind == NC_BUILTIN_ADDR            ? NC_CAST_PTR_TO_INT
+                         : e->u.builtin.kind == NC_BUILTIN_PTR_FROM_ADDR ? NC_CAST_INT_TO_PTR
+                                                                         : NC_CAST_NOP;
+        return emit_cast(lx, k, x, e->type, e->span);
+    }
     case NC_E_AGGREGATE: return lower_aggregate(lx, e);
-    case NC_E_UNARY: return lower_unary(lx, e);
+    case NC_E_UNARY:
+        if (e->u.unary.op == NC_UN_DEREF) return op_place(lower_place(lx, e), e->span);
+        if (e->u.unary.op == NC_UN_ADDR || e->u.unary.op == NC_UN_ADDR_MUT) {
+            nc_rvalue rv = {0};
+            rv.kind = NC_RV_ADDR;
+            rv.a = op_place(lower_place(lx, e->u.unary.operand), e->span);
+            return emit_rv(lx, e->type, rv, e->span);
+        }
+        return lower_unary(lx, e);
     case NC_E_BINARY:
         if (e->u.binary.op == NC_BIN_AND || e->u.binary.op == NC_BIN_OR) return lower_logical(lx, e);
         {
@@ -736,7 +802,9 @@ static nc_operand lower_expr(lowerer *lx, nc_expr *e)
     case NC_E_CONVERT: return lower_convert(lx, lower_expr(lx, e->u.convert.operand), e->type, e->span);
     case NC_E_IMPLICIT: {
         nc_operand x = lower_expr(lx, e->u.convert.operand);
-        nc_cast_kind k = nc_ty_is_float(e->type) ? NC_CAST_FLOAT_RESIZE : NC_CAST_INT_RESIZE;
+        nc_cast_kind k = nc_ty_is_float(e->type) ? NC_CAST_FLOAT_RESIZE
+                         : nc_ty_is_ptr(e->type) ? NC_CAST_NOP /* T* -> const T* */
+                                                 : NC_CAST_INT_RESIZE;
         return emit_cast(lx, k, x, e->type, e->span); /* lossless by construction */
     }
     default: nc_ice("nir lowering", "expression kind not supported in this phase");
@@ -758,8 +826,14 @@ static void lower_decl(lowerer *lx, nc_var_decl *d)
     for (uint32_t i = 0; i < d->ndecls; i++) {
         nc_declarator *dc = &d->decls[i];
         nc_operand v = {0};
-        bool has_init = dc->init && dc->init->kind == NC_INIT_EXPR;
-        if (has_init) v = lower_expr(lx, dc->init->expr); /* before the variable exists (D-038) */
+        bool has_init = dc->init && dc->init->kind != NC_INIT_LIST;
+        if (dc->init && dc->init->kind == NC_INIT_EXPR) {
+            v = lower_expr(lx, dc->init->expr); /* before the variable exists (D-038) */
+        } else if (has_init) { /* uninit: counts as initialised (NOVAC_MEMORY_MODEL.md §5) */
+            v.kind = NC_OP_UNDEF;
+            v.type = dc->var->type;
+            v.span = dc->init->span;
+        }
         bind_var(lx, dc->var);
         if (has_init) {
             nc_rvalue use = {0};
@@ -954,6 +1028,7 @@ static void lower_stmt(lowerer *lx, nc_stmt *s)
         break;
     }
     case NC_S_SWITCH: lower_switch(lx, s); break;
+    case NC_S_UNSAFE: lower_stmt(lx, s->u.unsafe_body); break;
     case NC_S_FALLTHROUGH: goto_block(lx, lx->fallthrough, s->span); break;
     case NC_S_UNSUPPORTED: nc_ice("nir lowering", "unsupported statement reached lowering");
     }

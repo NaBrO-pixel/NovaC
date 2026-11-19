@@ -50,6 +50,8 @@ static bool check_place(const nc_nir_module *m, const nc_nir_fn *f, const nc_pla
         const nc_type *next = NULL;
         if (pr->kind == NC_PROJ_FIELD) {
             if ((nc_ty_is_struct(t) || nc_ty_is_union(t)) && pr->field < t->agg->nfields) next = t->agg->fields[pr->field].type;
+        } else if (pr->kind == NC_PROJ_DEREF) {
+            if (nc_ty_is_ptr(t) && !nc_ty_is_void(t->elem)) next = t->elem;
         } else if (nc_ty_is_array(t)) {
             bool ok_index = pr->index_is_const ? pr->index < t->len
                                                : pr->index_local < f->nlocals &&
@@ -108,6 +110,28 @@ static bool check_rvalue(const nc_nir_module *m, const nc_nir_fn *f, const nc_ni
         }
         return true;
     case NC_RV_BINARY: return check_operand(m, f, &rv->a, why, n) && check_operand(m, f, &rv->b, why, n);
+    case NC_RV_ADDR:
+        if (!check_operand(m, f, &rv->a, why, n)) return false;
+        if (rv->a.kind != NC_OP_COPY || !nc_ty_is_ptr(dt) || dt->elem != rv->a.type) {
+            snprintf(why, n, "malformed address-of producing %s", nc_type_name(dt));
+            return false;
+        }
+        return true;
+    case NC_RV_PTR_OFFSET:
+    case NC_RV_PTR_DIFF: {
+        if (!check_operand(m, f, &rv->a, why, n) || !check_operand(m, f, &rv->b, why, n)) return false;
+        bool ok = nc_ty_is_ptr(rv->a.type);
+        if (rv->kind == NC_RV_PTR_OFFSET)
+            ok = ok && dt == rv->a.type &&
+                 (rv->b.type == nc_ty_prim(NC_PRIM_ISIZE) || rv->b.type == nc_ty_prim(NC_PRIM_USIZE));
+        else
+            ok = ok && rv->b.type == rv->a.type && dt == nc_ty_prim(NC_PRIM_ISIZE);
+        if (!ok) {
+            snprintf(why, n, "malformed pointer arithmetic producing %s", nc_type_name(dt));
+            return false;
+        }
+        return true;
+    }
     case NC_RV_UNARY:
     case NC_RV_CAST: return check_operand(m, f, &rv->a, why, n);
     case NC_RV_AGGREGATE: {
@@ -231,6 +255,8 @@ static void place(nc_session *s, FILE *out, const nc_place *p)
         const nc_type *parent = i ? p->projs[i - 1].type : nc_nir_place_base_type(dump_module, dump_fn, p);
         if (pr->kind == NC_PROJ_FIELD) {
             fprintf(out, ".%s", nc_sym_str(&s->strtab, parent->agg->fields[pr->field].name));
+        } else if (pr->kind == NC_PROJ_DEREF) {
+            fputs(".*", out);
         } else if (pr->index_is_const) {
             fprintf(out, "[%" PRIu64 "]", pr->index);
         } else {
@@ -254,6 +280,7 @@ static void operand(nc_session *s, FILE *out, const nc_operand *o)
     switch (o->kind) {
     case NC_OP_COPY: place(s, out, &o->place); return;
     case NC_OP_ZERO: fprintf(out, "zeroed %s", nc_type_name(o->type)); return;
+    case NC_OP_UNDEF: fprintf(out, "uninit %s", nc_type_name(o->type)); return;
     case NC_OP_CONST: cval(out, o->cval, o->type); return;
     }
 }
@@ -267,6 +294,8 @@ static const char *cast_name(nc_cast_kind k)
     case NC_CAST_FLOAT_RESIZE: return "float_resize";
     case NC_CAST_BOOL_TO_INT: return "bool_to_int";
     case NC_CAST_NOP: return "nop";
+    case NC_CAST_PTR_TO_INT: return "ptr_to_int";
+    case NC_CAST_INT_TO_PTR: return "int_to_ptr";
     }
     return "?";
 }
@@ -291,6 +320,19 @@ static void rvalue(nc_session *s, FILE *out, const nc_rvalue *rv, const nc_type 
         fprintf(out, "%s(", cast_name(rv->cast));
         operand(s, out, &rv->a);
         fprintf(out, " as %s)", nc_type_name(dest_type));
+        break;
+    case NC_RV_ADDR:
+        fputs("addr(", out);
+        operand(s, out, &rv->a);
+        fputc(')', out);
+        break;
+    case NC_RV_PTR_OFFSET:
+    case NC_RV_PTR_DIFF:
+        fputs(rv->kind == NC_RV_PTR_DIFF ? "ptr_diff(" : rv->binop == NC_NB_ADD ? "ptr_add(" : "ptr_sub(", out);
+        operand(s, out, &rv->a);
+        fputs(", ", out);
+        operand(s, out, &rv->b);
+        fputc(')', out);
         break;
     case NC_RV_AGGREGATE:
         fprintf(out, "%s {", nc_type_name(dest_type));

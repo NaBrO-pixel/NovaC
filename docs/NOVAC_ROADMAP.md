@@ -175,7 +175,8 @@ says which).
 ## Phase 4 — C interoperability, aggregates and unsafe
 
 Phase 4 is delivered in four steps, each committed with its tests:
-4a aggregates and `switch` (done: F-300); 4b raw pointers and `unsafe`;
+4a aggregates and `switch` (done: F-300); 4b raw pointers and `unsafe`
+(done: F-301, F-302);
 4c C interoperability and ABI lowering; 4d the `x86_64-novaris` target.
 
 - Structs, unions, enums, fixed arrays, raw pointers, `typedef`, statics,

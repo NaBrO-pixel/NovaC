@@ -16,6 +16,7 @@ typedef struct nc_session {
     nc_diag diag;
     nc_arena arena; /* tokens, AST, types: freed with the session */
     const struct nc_type *types; /* interned compound types (sema/types.c), in `arena` */
+    unsigned max_mode;           /* --max-mode= (0 safe, 1 controlled, 2 kernel) */
 } nc_session;
 
 /* `diag_out` may be NULL to count diagnostics without printing them. */

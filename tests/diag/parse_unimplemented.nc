@@ -5,6 +5,5 @@ interface Ord { }                   // ERROR E9001
 extern "C" { i32 puts(); }          // ERROR E9001
 void f(i32 x) {
     defer f(1);                     // ERROR E9001
-    unsafe { f(2); }                // ERROR E9001
     asm volatile ("nop");           // ERROR E9001
 }

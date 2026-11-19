@@ -23,6 +23,7 @@ typedef enum nc_type_kind {
     NC_TY_ENUM,
     NC_TY_UNTYPED_INT,
     NC_TY_UNTYPED_FLOAT,
+    NC_TY_NULL,          /* `null` until context gives it a pointer type */
     NC_TY_ERROR,
 } nc_type_kind;
 
@@ -89,6 +90,7 @@ const nc_type *nc_ty_prim(nc_prim p);
 const nc_type *nc_ty_untyped_int(void);
 const nc_type *nc_ty_untyped_float(void);
 const nc_type *nc_ty_error(void);
+const nc_type *nc_ty_null(void);
 
 /* Interned compound types (allocated in the session arena). */
 const nc_type *nc_ty_ptr(nc_session *s, const nc_type *pointee, bool pointee_const);
@@ -106,6 +108,7 @@ bool nc_ty_is_numeric(const nc_type *t); /* typed integer or float */
 bool nc_ty_is_bool(const nc_type *t);
 bool nc_ty_is_void(const nc_type *t);
 bool nc_ty_is_ptr(const nc_type *t);
+bool nc_ty_is_null(const nc_type *t);
 bool nc_ty_is_array(const nc_type *t);
 bool nc_ty_is_struct(const nc_type *t);
 bool nc_ty_is_union(const nc_type *t);

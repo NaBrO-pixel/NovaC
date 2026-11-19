@@ -1,0 +1,18 @@
+(module drivers.uart (attr mode (name kernel))
+  (struct Port
+    (field u16 base)
+    (field (ptr (const u8)) name)
+    (field (ptr (path Port)) next))
+  (fn read unsafe (ret u8) (params (param (ptr (const (path Port))) p) (param isize i))
+    (block
+      (return (index (arrow (name p) name) (name i)))))
+  (fn poke (ret void) (params (param (ptr u8) p) (param usize a))
+    (block
+      (unsafe
+        (block
+          (expr (assign = (unary * (name p)) (int 1)))
+          (decl (ptr u8) (var q (call (generic (name ptr_from_addr) (args u8)) (name a))))
+          (expr (assign = (unary * (binary + (name q) (int 1))) (unary * (name p))))
+          (decl usize (var back (call (name addr) (name q))))))
+      (decl (ptr (const u8)) (var c (unary & (unary * (name p)))))
+      (decl (ptr (path Port)) (var none_yet (null))))))

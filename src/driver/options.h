@@ -37,6 +37,7 @@ typedef struct nc_options {
     bool version;
     bool werror;
     unsigned error_limit;
+    unsigned max_mode;    /* --max-mode=: 0 safe, 1 controlled, 2 kernel (default: no limit) */
 } nc_options;
 
 /* Parses argv. Diagnostics go to `d`. Returns false on a command-line error

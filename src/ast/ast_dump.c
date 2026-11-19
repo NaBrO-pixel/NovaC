@@ -270,6 +270,17 @@ static void expr(dumper *d, const nc_expr *e)
             expr(d, e->u.agg.elems[i]);
         }
         break;
+    case NC_E_BUILTIN: {
+        static const char *const names[] = {"addr", "ptr_cast", "ptr_cast_mut", "ptr_from_addr"};
+        fprintf(d->out, "(builtin %s", names[e->u.builtin.kind]);
+        if (e->u.builtin.type) {
+            fputc(' ', d->out);
+            type_expr(d, e->u.builtin.type);
+        }
+        fputc(' ', d->out);
+        expr(d, e->u.builtin.operand);
+        break;
+    }
     case NC_E_IS:
         fputs("(is ", d->out);
         expr(d, e->u.is.operand);
@@ -367,6 +378,11 @@ static void stmt(dumper *d, const nc_stmt *s, int depth)
         break;
     case NC_S_EMPTY: fputs("(empty)", d->out); break;
     case NC_S_FALLTHROUGH: fputs("(fallthrough)", d->out); break;
+    case NC_S_UNSAFE:
+        fputs("(unsafe", d->out);
+        stmt(d, s->u.unsafe_body, depth + 1);
+        fputc(')', d->out);
+        break;
     case NC_S_SWITCH:
         fputs("(switch ", d->out);
         expr(d, s->u.switch_.expr);

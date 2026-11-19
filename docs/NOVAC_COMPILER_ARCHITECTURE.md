@@ -272,13 +272,15 @@ NIR is not SSA; LLVM's `mem2reg`/SROA produce SSA. A verifier checks
 well-formedness after lowering, in every build (a failure is an internal
 compiler error). `--dump-nir` (`--emit=nir`) prints a stable text form.
 
-**Implemented in Phases 3 and 4a** (`src/nir/`): a place is a local or a
-static followed by field and element projections (`_3.v[_5]`); an
+**Implemented in Phases 3 and 4** (`src/nir/`): a place is a local or a
+static followed by field, element and dereference projections
+(`_3.v[_5]`, `_1.*.next`); an
 element index is a constant (checked by sema, E5040) or a `usize`
 temporary that a preceding `assert` bounds-checked. Statements are
 `assign(place, rvalue)` and `checked(op, a, b)`, which writes the wrapped
-result and an overflow flag. Rvalues are `use`, `binary`, `unary`, `cast`
-and `aggregate`; operands are `copy`, `const` and `zeroed`. Terminators
+result and an overflow flag. Rvalues are `use`, `binary`, `unary`, `cast`,
+`aggregate`, `addr`, `ptr_add`/`ptr_sub` and `ptr_diff`; operands are
+`copy`, `const`, `zeroed` and `uninit`. Terminators
 are `goto`, `branch`, `switch`, `call`, `return`, `unreachable` and
 `assert(cond, expected, message)`. Every run-time check of
 NOVAC_TYPE_SYSTEM.md (overflow, division by zero, `MIN / -1`, shift

@@ -91,10 +91,13 @@ static void use(checker *c, const word *state, const nc_operand *o)
 static void use_stmt(checker *c, const word *state, const nc_nir_stmt *st)
 {
     use(c, state, &st->rv.a);
-    if (st->kind == NC_ST_CHECKED || st->rv.kind == NC_RV_BINARY) use(c, state, &st->rv.b);
+    if (st->kind == NC_ST_CHECKED || st->rv.kind == NC_RV_BINARY || st->rv.kind == NC_RV_PTR_OFFSET ||
+        st->rv.kind == NC_RV_PTR_DIFF)
+        use(c, state, &st->rv.b);
     if (st->kind == NC_ST_ASSIGN && st->rv.kind == NC_RV_AGGREGATE)
         for (uint32_t i = 0; i < st->rv.nelems; i++) use(c, state, &st->rv.elems[i]);
-    if (st->dest.nprojs) need(c, state, &st->dest, st->span, true);
+    /* Writing through `*p` reads p; writing a field or element needs the whole variable. */
+    if (st->dest.nprojs) need(c, state, &st->dest, st->span, st->dest.projs[0].kind != NC_PROJ_DEREF);
 }
 
 static void check_fn(checker *c, const nc_nir_fn *f)

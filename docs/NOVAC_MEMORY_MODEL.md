@@ -1,7 +1,10 @@
 # NovaC Memory Model
 
-Status: **Specification, Phase 1.** Nothing in this document is
-implemented yet; see [FEATURE_STATUS.md](FEATURE_STATUS.md).
+Status: **Specification, Phase 1; partly implemented.** Modes, `unsafe`
+blocks and functions, and the unsafe-operation checks of §2 and §6 are
+implemented since Phase 4b; definite initialisation of locals (§5) since
+Phase 3; ownership and borrowing are Phase 5. [FEATURE_STATUS.md](FEATURE_STATUS.md)
+is authoritative.
 
 This document defines programming modes, ownership, borrowing, lifetimes,
 initialisation, bounds safety, unsafe operations, and the concurrent
@@ -90,10 +93,10 @@ promise that **no call from safe code can cause undefined behaviour**,
 whatever arguments are passed. Breaking that promise is a bug in the
 controlled/kernel module. An `unsafe` function documents its caller's
 obligations in a comment starting `// SAFETY:` (enforced as warning
-W6010 when missing).
+W6010 when missing; planned: the lexer does not yet keep comments).
 
-The driver option `--max-mode=` (D-012) and the `.nci` interface record
-each module's mode, so a build can audit which modules use unsafe
+The driver option `--max-mode=` (D-012; E6004 above the limit) and the
+`.nci` interface record each module's mode, so a build can audit which modules use unsafe
 capabilities.
 
 ## 3. Ownership
@@ -360,4 +363,5 @@ No language-level async in version 1 (D-029).
 | E6001 | `unsafe` in a safe module |
 | E6002 | kernel-only operation in a non-kernel module |
 | E6003 | unsafe operation outside an `unsafe` context |
+| E6004 | module `@mode` above the `--max-mode=` limit of the build |
 | W6010 | `unsafe` function without a `// SAFETY:` comment |

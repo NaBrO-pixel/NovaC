@@ -143,8 +143,17 @@ typedef enum nc_expr_kind {
     NC_E_GENERIC,  /* name::<args> */
     NC_E_IS,
     NC_E_AGGREGATE, /* produced by sema from initialiser lists and struct literals */
+    NC_E_BUILTIN,   /* produced by sema from calls of addr, ptr_cast, ptr_cast_mut, ptr_from_addr */
     NC_E_ERROR,
 } nc_expr_kind;
+
+/* Built-in pointer functions (NOVAC_TYPE_SYSTEM.md §5.3). */
+typedef enum nc_builtin {
+    NC_BUILTIN_ADDR,          /* addr(p): usize, safe */
+    NC_BUILTIN_PTR_CAST,      /* ptr_cast::<U*>(p): keeps const, safe */
+    NC_BUILTIN_PTR_CAST_MUT,  /* ptr_cast_mut::<U*>(p): may remove const, unsafe */
+    NC_BUILTIN_PTR_FROM_ADDR, /* ptr_from_addr::<T>(a): T*, unsafe */
+} nc_builtin;
 
 typedef enum nc_unop {
     NC_UN_NEG, NC_UN_PLUS, NC_UN_NOT, NC_UN_BITNOT,
@@ -260,6 +269,11 @@ struct nc_expr {
             nc_pattern pattern;
         } is;
         struct {
+            nc_builtin kind;
+            nc_expr *operand;
+            nc_type_expr *type;  /* the explicit type argument, or NULL */
+        } builtin;
+        struct {
             nc_expr **elems;     /* struct: one per field in order; array: one per element */
             uint32_t nelems;
             uint32_t union_field; /* union: the initialised field (nelems == 1) */
@@ -274,7 +288,8 @@ typedef enum nc_stmt_kind {
     NC_S_BREAK, NC_S_CONTINUE, NC_S_RETURN, NC_S_EXPR, NC_S_EMPTY,
     NC_S_SWITCH,
     NC_S_FALLTHROUGH,
-    NC_S_UNSUPPORTED, /* defer, unsafe, asm: recognised, skipped */
+    NC_S_UNSAFE,      /* unsafe { ... }: u.unsafe_body is the block */
+    NC_S_UNSUPPORTED, /* defer, asm: recognised, skipped */
 } nc_stmt_kind;
 
 typedef struct nc_case {
@@ -333,6 +348,7 @@ struct nc_stmt {
             nc_case *cases;
             uint32_t ncases;
         } switch_;
+        nc_stmt *unsafe_body; /* UNSAFE: a BLOCK */
         nc_expr *ret; /* RETURN: NULL for `return;` */
         nc_expr *expr;
         const char *unsupported; /* construct name */

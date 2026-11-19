@@ -12,12 +12,14 @@ static const nc_type prims[NC_PRIM_COUNT] = {
 };
 static const nc_type untyped_int = {NC_TY_UNTYPED_INT, NC_PRIM_VOID, NULL, false, 0, NULL, NULL, "{integer}", NULL};
 static const nc_type untyped_float = {NC_TY_UNTYPED_FLOAT, NC_PRIM_VOID, NULL, false, 0, NULL, NULL, "{float}", NULL};
+static const nc_type null_type = {NC_TY_NULL, NC_PRIM_VOID, NULL, false, 0, NULL, NULL, "null", NULL};
 static const nc_type error_type = {NC_TY_ERROR, NC_PRIM_VOID, NULL, false, 0, NULL, NULL, "{error}", NULL};
 
 const nc_type *nc_ty_prim(nc_prim p) { return &prims[p]; }
 const nc_type *nc_ty_untyped_int(void) { return &untyped_int; }
 const nc_type *nc_ty_untyped_float(void) { return &untyped_float; }
 const nc_type *nc_ty_error(void) { return &error_type; }
+const nc_type *nc_ty_null(void) { return &null_type; }
 
 /* ---- interning (the list hangs off the session; nodes live in its arena) ---- */
 
@@ -93,6 +95,7 @@ bool nc_ty_is_numeric(const nc_type *t) { return nc_ty_is_integer(t) || nc_ty_is
 bool nc_ty_is_bool(const nc_type *t) { return t && t->kind == NC_TY_PRIM && t->prim == NC_PRIM_BOOL; }
 bool nc_ty_is_void(const nc_type *t) { return t && t->kind == NC_TY_PRIM && t->prim == NC_PRIM_VOID; }
 bool nc_ty_is_ptr(const nc_type *t) { return t && t->kind == NC_TY_PTR; }
+bool nc_ty_is_null(const nc_type *t) { return t && t->kind == NC_TY_NULL; }
 bool nc_ty_is_array(const nc_type *t) { return t && t->kind == NC_TY_ARRAY; }
 bool nc_ty_is_struct(const nc_type *t) { return t && t->kind == NC_TY_STRUCT; }
 bool nc_ty_is_union(const nc_type *t) { return t && t->kind == NC_TY_UNION; }
@@ -104,7 +107,7 @@ bool nc_ty_is_aggregate(const nc_type *t)
 
 bool nc_ty_is_sized(const nc_type *t)
 {
-    if (!t || nc_ty_is_error(t) || nc_ty_is_untyped(t) || nc_ty_is_void(t)) return false;
+    if (!t || nc_ty_is_error(t) || nc_ty_is_untyped(t) || nc_ty_is_null(t) || nc_ty_is_void(t)) return false;
     if (t->kind == NC_TY_STRUCT || t->kind == NC_TY_UNION) return !t->agg->opaque && t->agg->state == NC_LAYOUT_DONE;
     return true;
 }

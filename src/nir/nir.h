@@ -33,7 +33,11 @@ typedef struct nc_nir_local {
 } nc_nir_local;
 
 typedef enum nc_place_base { NC_PLACE_LOCAL, NC_PLACE_STATIC } nc_place_base;
-typedef enum nc_proj_kind { NC_PROJ_FIELD, NC_PROJ_INDEX } nc_proj_kind;
+typedef enum nc_proj_kind {
+    NC_PROJ_FIELD,
+    NC_PROJ_INDEX,
+    NC_PROJ_DEREF, /* the pointee of a raw pointer (only in unsafe code) */
+} nc_proj_kind;
 
 typedef struct nc_proj {
     nc_proj_kind kind;
@@ -55,7 +59,8 @@ typedef struct nc_place {
 typedef enum nc_operand_kind {
     NC_OP_COPY,  /* the value stored in a place */
     NC_OP_CONST, /* a scalar constant */
-    NC_OP_ZERO,  /* the all-zero value of `type` (omitted initialiser members, D-043) */
+    NC_OP_ZERO,  /* the all-zero value of `type` (omitted initialiser members, D-043; null) */
+    NC_OP_UNDEF, /* `uninit`: no value; storing it leaves the destination unchanged */
 } nc_operand_kind;
 
 typedef struct nc_operand {
@@ -84,10 +89,21 @@ typedef enum nc_cast_kind {
     NC_CAST_FLOAT_TO_INT, /* truncates toward zero; range checked beforehand */
     NC_CAST_FLOAT_RESIZE,
     NC_CAST_BOOL_TO_INT,
-    NC_CAST_NOP,          /* enum <-> its underlying integer type: same representation */
+    NC_CAST_NOP,          /* same representation: enum <-> underlying integer, pointer -> pointer */
+    NC_CAST_PTR_TO_INT,   /* addr(p) */
+    NC_CAST_INT_TO_PTR,   /* ptr_from_addr */
 } nc_cast_kind;
 
-typedef enum nc_rvalue_kind { NC_RV_USE, NC_RV_BINARY, NC_RV_UNARY, NC_RV_CAST, NC_RV_AGGREGATE } nc_rvalue_kind;
+typedef enum nc_rvalue_kind {
+    NC_RV_USE,
+    NC_RV_BINARY,
+    NC_RV_UNARY,
+    NC_RV_CAST,
+    NC_RV_AGGREGATE,
+    NC_RV_ADDR,       /* the address of place a.place (a is a COPY operand naming it) */
+    NC_RV_PTR_OFFSET, /* a + b elements (binop ADD) or a - b elements (binop SUB); wrapping */
+    NC_RV_PTR_DIFF,   /* (a - b) / sizeof(pointee), as isize */
+} nc_rvalue_kind;
 
 typedef struct nc_rvalue {
     nc_rvalue_kind kind;
