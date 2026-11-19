@@ -425,6 +425,11 @@ static void string_lit(lexer *lx, uint32_t lo, nc_tok kind)
         nc_vec_push(&buf, (char)c);
         lx->pos++;
     }
+    if (good && kind == NC_T_CSTRING_LIT && buf.len && memchr(buf.data, 0, buf.len)) {
+        /* C would see the string end at the NUL. */
+        error(lx, lo, lx->pos, "E1033", "a C string literal cannot contain a NUL byte");
+        good = false;
+    }
     nc_token *t = push(lx, kind, lo);
     if (good) t->v.sym = nc_intern(&lx->s->strtab, buf.data ? buf.data : "", buf.len);
     nc_vec_free(&buf);

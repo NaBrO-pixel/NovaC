@@ -1,7 +1,9 @@
 # NovaC ABI and C Interoperability
 
-Status: **Specification, Phase 1.** Nothing in this document is
-implemented yet; see [FEATURE_STATUS.md](FEATURE_STATUS.md).
+Status: **Specification, Phase 1; partly implemented.** Data layout (§3,
+§4), mangling (§7), the hosted panic interface (§9.1), the C calling
+convention on the three Linux targets (§5) and C interoperability (§11)
+are implemented; [FEATURE_STATUS.md](FEATURE_STATUS.md) is authoritative.
 
 This document defines targets, data layout, calling conventions, symbol
 naming, object files, the runtime contract, and C interoperability.
@@ -131,6 +133,32 @@ test cases call between NovaC and Clang-compiled C in both directions with
 structs of every classification and compare results (§12). Until those
 tests pass for a target, passing aggregates by value across `extern "C"`
 on that target is rejected (E7032), not guessed.
+
+**Implemented in Phase 4c** (`src/target/abi.c`, used by
+`src/codegen/llvm.c`), calibrated against Clang 18's LLVM IR for the same
+C declarations and verified by `tests/abi/` on all three Linux targets:
+
+- Scalars: `signext`/`zeroext` on integers narrower than 32 bits (and
+  `bool`) on x86-64 and RISC-V; on RISC-V also `signext` on every 32-bit
+  integer, signed or not; none on AArch64.
+- x86-64: eightbytes classified INTEGER or SSE (an integer member makes
+  the eightbyte INTEGER) and passed as separate arguments (`i64`, `iN`,
+  `double`, `float`, `<2 x float>`); results as a literal struct; more
+  than 16 bytes, unaligned fields, or not enough free registers for the
+  whole value (6 integer, 8 SSE; `sret` takes one) mean memory: `byval`
+  arguments, `sret` results.
+- AArch64: HFAs of one to four `f32` or `f64` as `[N x T]` with
+  `alignstack(8)` (results as a literal struct); other aggregates of up to
+  8 bytes as `i64`, up to 16 as `[2 x i64]`; larger ones by pointer to a
+  caller-made copy; `sret` results in x8.
+- RISC-V LP64D: a struct (no unions) of one or two floating-point fields,
+  or one floating-point and one integer field, passes field by field in
+  `fa`/`a` registers when enough are free; otherwise the integer
+  convention: `i64` up to 8 bytes, `[2 x i64]` up to 16, larger by pointer
+  to a caller-made copy; `sret` results.
+- Variadic arguments are scalars only (E7033); LLVM places them as each
+  target requires, including `al` on x86-64 and integer registers for
+  floating-point values on RISC-V.
 
 ## 6. Calling conventions
 
@@ -338,9 +366,25 @@ extern "C" {
 }
 ```
 
-Every function in an `extern` block is `unsafe` to call (§6 of
-NOVAC_MEMORY_MODEL.md). `@link_name("sym")` binds to a different symbol
-name. Libraries are linked with `-l`/`-L` driver options.
+Every imported function is `unsafe` to call (§6 of NOVAC_MEMORY_MODEL.md),
+whether declared in an `extern "C" { }` block or as `extern "C" R f(...);`.
+`@link_name("sym")` binds to a different symbol name. Libraries are linked
+with the `-l`/`-L` driver options; `.o`, `.a` and `.so` inputs go to the
+linker too. Only the ABI string `"C"` exists (E7034).
+
+A variadic import is called with explicit promotions, as in Rust: C would
+promote `float` to `double` and integers narrower than `int` (and `_Bool`)
+to `int`, so passing an `f32`, `bool`, `i8`, `u8`, `i16` or `u16` there,
+or any aggregate, is E7033 (write `f64(x)` or `c_int(x)`). Untyped
+constants become `c_int` or `f64`. NovaC cannot define variadic functions
+(E7035).
+
+`c"text"` is a NUL-terminated constant of type `const c_char*`; it cannot
+contain a NUL byte (E1033). The `core.ffi` names `c_char`, `c_schar`,
+`c_uchar`, `c_short`, `c_ushort`, `c_int`, `c_uint`, `c_long`, `c_ulong`,
+`c_longlong`, `c_ulonglong`, `c_size_t`, `c_ssize_t` and the opaque
+`c_void` are predeclared until modules exist (D-045). `c_char` is `i8` on
+x86-64 and `u8` on AArch64 and RISC-V Linux, as C's `char`.
 
 ### 11.2 Exporting NovaC functions
 
@@ -348,8 +392,12 @@ name. Libraries are linked with `-l`/`-L` driver options.
 extern "C" i32 nova_checksum(const u8* data, usize len) { ... }
 ```
 
-The symbol is unmangled. `ncc --emit-c-header` (planned) writes a C
-header for a module's exported functions and FFI-safe types into a
+The symbol is unmangled, and external whether or not the function is
+`public`. `@export("sym")` gives it another name; on a `static` it exports
+the static under that name. C symbols must be unique (E3002) and may not
+start with `__nova` or `_NC` (E3020). A NovaC `main` is reached through the
+generated C `main`; an `extern "C" i32 main()` is the C entry point itself.
+`ncc --emit-c-header` (planned) writes a C header for a module's exported functions and FFI-safe types into a
 `nova/` directory (D-020).
 
 ### 11.3 FFI-safe types
@@ -373,14 +421,22 @@ array members, `long double`, `va_list`, defining variadic functions,
 (undefined behaviour), and C's `errno` (accessed through the C library's
 function such as `__errno_location`, wrapped by `std.sys`).
 
-## 12. ABI conformance testing (plan)
+## 12. ABI conformance testing
 
-`tests/abi/` (Phase 4): for each target, a generator produces pairs of
-NovaC and C files exercising every scalar type and struct classification
-in arguments and return values, both directions, plus `sizeof`/`alignof`/
-`offsetof` agreement for C-layout structs. Cross targets run under
-`qemu-aarch64`/`qemu-riscv64` user-mode emulation (not installed in the
-reference environment; a Phase 3 prerequisite for cross testing).
+`tests/abi/gen.py` generates pairs of NovaC and C files (committed, and
+checked to be up to date by `make test`): every scalar type, sign and zero
+extension of narrowed values, variadic calls, and about 50 aggregates
+(integer, floating-point and mixed structs, nested structs, array fields,
+pointers, enums, unions, HFAs, structs of up to 40 bytes). For each, C
+makes a value that NovaC checks and the reverse, values are echoed through
+both, and a call with eight copies exhausts the argument registers. The C
+half is compiled by Clang for the target (`-ffreestanding`, no C library
+headers); the tests run natively at seven optimisation configurations and
+under `qemu-aarch64`/`qemu-riscv64` at `-O0` and `-O2`, in the `abi` suite
+of `tests/run_tests.py`. `sizeof`/`alignof`/`offsetof` agreement is
+implied: both sides compute field checksums through C-layout structs.
+Removing the extension attributes, or a piece of the HFA lowering, makes
+these tests fail (checked while developing Phase 4c).
 
 ## 13. Diagnostics (ABI)
 
@@ -391,4 +447,7 @@ reference environment; a Phase 3 prerequisite for cross testing).
 | E7030 | non-FFI-safe type in an `extern "C"` signature |
 | E7031 | `long double` / `va_list` in FFI (unsupported) |
 | E7032 | aggregate by value across `extern "C"` on a target whose ABI lowering is not yet verified |
+| E7033 | variadic argument that C would promote (`f32`, `bool`, integers narrower than `c_int`), or an aggregate |
+| E7034 | ABI string other than `"C"` |
+| E7035 | definition of a variadic function (only C functions may be variadic) |
 | E7040 | `@interrupt` on a target without an interrupt calling convention |

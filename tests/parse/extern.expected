@@ -1,0 +1,13 @@
+(module sys (attr mode (name controlled))
+  (fn printf extern "C" (ret (path c_int)) (params (param (ptr (const (path c_char))) fmt) ...) -)
+  (fn sys_write extern "C" (attr link_name (string "write")) (ret isize) (params (param (path c_int) fd) (param (ptr (const u8)) buf) (param usize n)) -)
+  (fn crc extern "C" (ret u32) (params (param (ptr (const u8)) p) (param usize n)) -)
+  (fn hash extern "C" (attr export (string "nova_hash")) (ret u64) (params (param (ptr (const u8)) p))
+    (block
+      (return (int 0))))
+  (static counter (attr export (string "nova_count")) u64 (int 0))
+  (fn f (ret void) (params)
+    (block
+      (unsafe
+        (block
+          (expr (call (name printf) (cstring "%s\n") (cstring "tab\t"))))))))

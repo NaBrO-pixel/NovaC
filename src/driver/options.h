@@ -25,6 +25,8 @@ typedef struct nc_options {
     const char **inputs;
     int ninputs;
     const char *output;   /* -o, or NULL */
+    const char **link_args; /* -l, -L, .o/.a/.so inputs: passed to the linker in order */
+    int nlink_args;
     char opt;             /* '0' '1' '2' '3' 's' 'z' */
     bool fast_math;       /* -Ofast */
     bool debug;           /* -g */

@@ -601,7 +601,8 @@ static const nc_type *name_as_type(nc_sema *sm, const nc_expr *e)
 {
     if (e->kind != NC_E_NAME || nc_scope_lookup(sm, e->u.name)) return NULL;
     nc_module_sym *ms = nc_sema_find_module_sym(sm, e->u.name);
-    return ms ? nc_sema_msym_type(sm, ms) : NULL;
+    if (ms) return nc_sema_msym_type(sm, ms);
+    return nc_sema_ffi_type(sm, nc_sema_sym(sm, e->u.name)); /* c_int(x), sizeof(c_long) */
 }
 
 static const char *agg_kind(const nc_type *t)
@@ -1187,7 +1188,7 @@ static const nc_type *check_struct_lit(nc_sema *sm, nc_expr **slot)
 bool nc_is_constant_expr(const nc_expr *e)
 {
     if (!e) return true; /* a zero-initialised member */
-    if (e->cval.kind != NC_CV_NONE || e->kind == NC_E_NULL) return true;
+    if (e->cval.kind != NC_CV_NONE || e->kind == NC_E_NULL || e->kind == NC_E_CSTRING) return true;
     if (e->kind == NC_E_IMPLICIT) return nc_is_constant_expr(e->u.convert.operand);
     if (e->kind != NC_E_AGGREGATE) return false;
     for (uint32_t i = 0; i < e->u.agg.nelems; i++)
@@ -1375,6 +1376,39 @@ static const nc_type *check_assign(nc_sema *sm, nc_expr *e)
 
 static const nc_type *check_convert(nc_sema *sm, nc_expr *e);
 
+/* An argument in the variadic part of a C call: C's default argument
+ * promotions are written explicitly, as in Rust (NOVAC_ABI.md §11.1). */
+static void check_variadic_arg(nc_sema *sm, nc_expr **slot, const nc_fn_info *fn)
+{
+    nc_expr *e = *slot;
+    const nc_type *t = e->type;
+    if (t && t->kind == NC_TY_UNTYPED_INT) {
+        nc_coerce(sm, slot, nc_ty_prim(NC_PRIM_I32), "a variadic argument (c_int)");
+        return;
+    }
+    if (t && t->kind == NC_TY_UNTYPED_FLOAT) {
+        nc_coerce(sm, slot, nc_ty_prim(NC_PRIM_F64), "a variadic argument (f64)");
+        return;
+    }
+    nc_default_untyped(sm, slot);
+    t = (*slot)->type;
+    if (nc_ty_is_error(t)) return;
+    const char *fname = nc_sema_sym(sm, fn->decl->u.fn.name);
+    const nc_type *r = nc_ty_repr(t);
+    if (nc_ty_is_aggregate(t)) {
+        nc_diag_error(NC_DIAG(sm), e->span, "E7033", "a '%s' cannot be passed to the variadic part of '%s'",
+                      nc_type_name(t), fname);
+        nc_diag_help(NC_DIAG(sm), "pass a pointer to it");
+    } else if (nc_ty_is_float(r) && r->prim == NC_PRIM_F32) {
+        nc_diag_error(NC_DIAG(sm), e->span, "E7033", "an 'f32' passed to the variadic part of '%s' must be promoted", fname);
+        nc_diag_help(NC_DIAG(sm), "C promotes it to double: write `f64(x)`");
+    } else if (nc_ty_is_bool(r) || (nc_ty_is_integer(r) && nc_ty_bits(r) < 32)) {
+        nc_diag_error(NC_DIAG(sm), e->span, "E7033", "a '%s' passed to the variadic part of '%s' must be promoted",
+                      nc_type_name(t), fname);
+        nc_diag_help(NC_DIAG(sm), "C promotes it to int: write `c_int(x)`");
+    }
+}
+
 /* Is `name` a builtin here, i.e. not shadowed by a local or module item? */
 static bool is_builtin_name(nc_sema *sm, const nc_expr *e, const char *name)
 {
@@ -1430,7 +1464,9 @@ static const nc_type *check_builtin_call(nc_sema *sm, nc_expr *e)
         if (!nc_sema_require_unsafe(sm, e->span, "'ptr_from_addr'")) return fail(e);
         return set_type(e, nc_ty_ptr(sm->s, target, false));
     }
-    const nc_type *from = nc_check_value(sm, slot, NULL);
+    /* `ptr_cast::<U*>(&x)`: any pointer type lets `&x` be a pointer (D-044). */
+    const nc_type *any_ptr = target && nc_ty_is_ptr(target) ? target : nc_ty_ptr(sm->s, nc_ty_prim(NC_PRIM_U8), true);
+    const nc_type *from = nc_check_value(sm, slot, any_ptr);
     if (nc_ty_is_error(from)) return fail(e);
     if (!nc_ty_is_ptr(from)) {
         nc_diag_error(NC_DIAG(sm), (*slot)->span, "E4001", "the argument of '%s' must be a pointer, found '%s'", name,
@@ -1509,10 +1545,10 @@ static const nc_type *check_call(nc_sema *sm, nc_expr *e)
                           "called expression is not a function (it has type '%s')", nc_type_name(t));
     }
 
-    if (fn && e->u.call.nargs != fn->nparams) {
-        nc_diag_error(NC_DIAG(sm), e->span, "E4002", "function '%s' takes %u argument%s, but %u %s given",
-                      nc_sema_sym(sm, fn->decl->u.fn.name), fn->nparams, fn->nparams == 1 ? "" : "s",
-                      e->u.call.nargs, e->u.call.nargs == 1 ? "was" : "were");
+    if (fn && (fn->variadic ? e->u.call.nargs < fn->nparams : e->u.call.nargs != fn->nparams)) {
+        nc_diag_error(NC_DIAG(sm), e->span, "E4002", "function '%s' takes %s%u argument%s, but %u %s given",
+                      nc_sema_sym(sm, fn->decl->u.fn.name), fn->variadic ? "at least " : "", fn->nparams,
+                      fn->nparams == 1 ? "" : "s", e->u.call.nargs, e->u.call.nargs == 1 ? "was" : "were");
         nc_diag_note(NC_DIAG(sm), fn->decl->u.fn.name_span, "'%s' is declared here",
                      nc_sema_sym(sm, fn->decl->u.fn.name));
     }
@@ -1523,12 +1559,18 @@ static const nc_type *check_call(nc_sema *sm, nc_expr *e)
             char what[96];
             snprintf(what, sizeof what, "argument %u of '%s'", i + 1, nc_sema_sym(sm, fn->decl->u.fn.name));
             nc_coerce(sm, &e->u.call.args[i], pt, what);
+        } else if (fn && fn->variadic) {
+            check_variadic_arg(sm, &e->u.call.args[i], fn);
         } else {
             nc_default_untyped(sm, &e->u.call.args[i]);
         }
     }
     if (!fn) return fail(e);
-    if (fn->decl->u.fn.is_unsafe) {
+    if (fn->is_import) {
+        char what[96];
+        snprintf(what, sizeof what, "calling the C function '%s'", nc_sema_sym(sm, fn->decl->u.fn.name));
+        if (!nc_sema_require_unsafe(sm, e->span, what)) return fail(e);
+    } else if (fn->decl->u.fn.is_unsafe) {
         char what[96];
         snprintf(what, sizeof what, "calling the unsafe function '%s'", nc_sema_sym(sm, fn->decl->u.fn.name));
         if (!nc_sema_require_unsafe(sm, e->span, what)) return fail(e);
@@ -1668,7 +1710,8 @@ static const nc_type *check_expr(nc_sema *sm, nc_expr **slot, const nc_type *exp
         e->cval = nc_cv_int(false, e->u.char_lit);
         return set_type(e, nc_ty_prim(NC_PRIM_U8));
     case NC_E_STRING: return unsupported(sm, e, "string literals are", 6);
-    case NC_E_CSTRING: return unsupported(sm, e, "C string literals are", 4);
+    case NC_E_CSTRING: /* c"...": a NUL-terminated constant array, as `const c_char*` */
+        return set_type(e, nc_ty_ptr(sm->s, nc_sema_ffi_type(sm, "c_char"), true));
     case NC_E_NULL: return set_type(e, nc_ty_null());
     case NC_E_NONE: return unsupported(sm, e, "`none` (optional types) is", 6);
     case NC_E_SOME: return unsupported(sm, e, "`some` (optional types) is", 6);

@@ -416,6 +416,7 @@ struct nc_decl {
             nc_span name_span;
             nc_sym extern_abi;  /* "C" in `extern "C"`, or 0 */
             bool has_extern;
+            bool in_extern_block; /* declared inside `extern "C" { ... }` */
             bool is_unsafe;
             nc_type_expr *ret;
             uint32_t ngeneric;  /* generic parameters (Phase 6) */

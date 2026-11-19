@@ -168,6 +168,13 @@ bool nc_nir_verify(const nc_nir_module *m, char *why, size_t n)
 {
     for (uint32_t i = 0; i < m->nfns; i++) {
         const nc_nir_fn *f = m->fns[i];
+        if (f->is_import) {
+            if (f->nblocks) {
+                snprintf(why, n, "an imported function has blocks");
+                return false;
+            }
+            continue;
+        }
         if (f->nblocks == 0) {
             snprintf(why, n, "function without blocks");
             return false;
@@ -214,13 +221,14 @@ bool nc_nir_verify(const nc_nir_module *m, char *why, size_t n)
                 break;
             case NC_TERM_CALL:
                 if (!check_block_id(f, t->target, why, n)) return false;
-                if (!t->callee || t->nargs != t->callee->nparams) {
+                if (!t->callee || (t->callee->info->variadic ? t->nargs < t->callee->nparams
+                                                             : t->nargs != t->callee->nparams)) {
                     snprintf(why, n, "bb%u: call with a wrong argument count", b);
                     return false;
                 }
                 for (uint32_t a = 0; a < t->nargs; a++) {
                     if (!check_operand(m, f, &t->args[a], why, n)) return false;
-                    if (t->args[a].type != t->callee->locals[a].type) {
+                    if (a < t->callee->nparams && t->args[a].type != t->callee->info->params[a]) {
                         snprintf(why, n, "bb%u: argument %u has the wrong type", b, a);
                         return false;
                     }
@@ -281,6 +289,17 @@ static void operand(nc_session *s, FILE *out, const nc_operand *o)
     case NC_OP_COPY: place(s, out, &o->place); return;
     case NC_OP_ZERO: fprintf(out, "zeroed %s", nc_type_name(o->type)); return;
     case NC_OP_UNDEF: fprintf(out, "uninit %s", nc_type_name(o->type)); return;
+    case NC_OP_CSTRING: {
+        fputs("c\"", out);
+        const char *str = nc_sym_str(&s->strtab, o->str);
+        for (uint32_t i = 0; i < nc_sym_len(&s->strtab, o->str); i++) {
+            unsigned char ch = (unsigned char)str[i];
+            if (ch >= 0x20 && ch < 0x7f && ch != '"' && ch != '\\') fputc(ch, out);
+            else fprintf(out, "\\x%02x", ch);
+        }
+        fputc('"', out);
+        return;
+    }
     case NC_OP_CONST: cval(out, o->cval, o->type); return;
     }
 }
@@ -362,7 +381,15 @@ void nc_nir_dump(nc_session *s, const nc_nir_module *m, FILE *out)
     for (uint32_t i = 0; i < m->nfns; i++) {
         const nc_nir_fn *f = m->fns[i];
         dump_fn = f;
-        fprintf(out, "\nfn %s%s(", f->is_public ? "public " : "", nc_sym_str(&s->strtab, f->name));
+        if (f->is_import) {
+            fprintf(out, "\nextern \"C\" fn %s(", nc_sym_str(&s->strtab, f->name));
+            for (uint32_t p = 0; p < f->nparams; p++) fprintf(out, "%s%s", p ? ", " : "", nc_type_name(f->info->params[p]));
+            fprintf(out, "%s) -> %s; // symbol %s\n", f->info->variadic ? ", ..." : "", nc_type_name(f->ret),
+                    nc_sym_str(&s->strtab, f->info->symbol));
+            continue;
+        }
+        fprintf(out, "\nfn %s%s%s(", f->is_c ? "extern \"C\" " : "", f->is_public ? "public " : "",
+                nc_sym_str(&s->strtab, f->name));
         for (uint32_t p = 0; p < f->nparams; p++)
             fprintf(out, "%s_%u: %s", p ? ", " : "", p, nc_type_name(f->locals[p].type));
         fprintf(out, ") -> %s {\n", nc_type_name(f->ret));

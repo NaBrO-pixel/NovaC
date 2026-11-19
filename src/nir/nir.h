@@ -61,12 +61,14 @@ typedef enum nc_operand_kind {
     NC_OP_CONST, /* a scalar constant */
     NC_OP_ZERO,  /* the all-zero value of `type` (omitted initialiser members, D-043; null) */
     NC_OP_UNDEF, /* `uninit`: no value; storing it leaves the destination unchanged */
+    NC_OP_CSTRING, /* c"...": the address of a NUL-terminated constant array */
 } nc_operand_kind;
 
 typedef struct nc_operand {
     nc_operand_kind kind;
     nc_place place;      /* COPY */
     nc_cval cval;        /* CONST */
+    nc_sym str;          /* CSTRING: the bytes, without the NUL */
     const nc_type *type;
     nc_span span;        /* source of the value, for diagnostics */
 } nc_operand;
@@ -169,10 +171,12 @@ typedef struct nc_nir_block {
 } nc_nir_block;
 
 typedef struct nc_nir_fn {
-    nc_fn_info *info;
+    nc_fn_info *info;          /* info->params: the parameter types (imports have no locals) */
     nc_sym name;
     nc_span span;
     bool is_public;
+    bool is_c;                 /* the C calling convention, symbol info->symbol */
+    bool is_import;            /* defined in C: no blocks */
     const nc_type *ret;
     nc_nir_local *locals;   /* parameters first, in order */
     uint32_t nlocals, cap_locals;
@@ -190,6 +194,7 @@ typedef struct nc_nir_static {
     bool is_const;
     bool is_public;
     const nc_expr *init;    /* a constant expression (nc_is_constant_expr) */
+    nc_sym export_symbol;   /* @export: the unmangled symbol, or 0 */
 } nc_nir_static;
 
 typedef struct nc_nir_module {

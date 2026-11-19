@@ -10,6 +10,7 @@
 #include "codegen/codegen.h"
 
 #include "sema/consteval.h"
+#include "target/abi.h"
 
 #include <llvm-c/Analysis.h>
 #include <llvm-c/BitWriter.h>
@@ -52,6 +53,8 @@ typedef struct cg {
     LLVMTypeRef *agg_types;
     uint32_t naggs, cap_aggs;
     LLVMValueRef *static_vals;
+    nc_abi_fn *abis;          /* per function: the C ABI lowering of extern "C" functions */
+    const nc_abi_fn *cur_abi; /* the current function's, if it is extern "C" */
 } cg;
 
 void nc_codegen_init(void)
@@ -309,6 +312,12 @@ static LLVMValueRef const_value(cg *g, nc_cval v, const nc_type *t)
     return LLVMConstInt(ty, bits, 0);
 }
 
+/* c"...": a private NUL-terminated constant. */
+static LLVMValueRef cstring(cg *g, nc_sym str)
+{
+    return global_string(g, nc_sym_str(&g->s->strtab, str), nc_sym_len(&g->s->strtab, str), "nova.cstr");
+}
+
 /* The address of a place (NIR projections become GEPs). Sets *misaligned
  * if the place lies inside a @packed struct, where its natural alignment
  * cannot be assumed. */
@@ -347,6 +356,7 @@ static LLVMValueRef operand(cg *g, const nc_operand *o)
     case NC_OP_CONST: return const_value(g, o->cval, o->type);
     case NC_OP_ZERO: return LLVMConstNull(llvm_type(g, o->type));
     case NC_OP_UNDEF: return LLVMGetUndef(llvm_type(g, o->type));
+    case NC_OP_CSTRING: return cstring(g, o->str);
     case NC_OP_COPY: break;
     }
     bool misaligned;
@@ -587,6 +597,291 @@ static void gen_stmt(cg *g, const nc_nir_stmt *st)
     if (misaligned) LLVMSetAlignment(st_i, 1);
 }
 
+/* ---- the C calling convention (NOVAC_ABI.md §5, target/abi.h) ---------------------------- */
+
+static LLVMTypeRef piece_type(cg *g, const nc_abi_piece *pc)
+{
+    switch (pc->kind) {
+    case NC_PIECE_INT: return LLVMIntTypeInContext(g->ctx, pc->size * 8);
+    case NC_PIECE_F32: return LLVMFloatTypeInContext(g->ctx);
+    case NC_PIECE_F64: return LLVMDoubleTypeInContext(g->ctx);
+    case NC_PIECE_F32X2: return LLVMVectorType(LLVMFloatTypeInContext(g->ctx), 2);
+    }
+    nc_ice("codegen", "invalid ABI piece");
+}
+
+/* The single LLVM value a COERCE argument or result is (1 piece, an array,
+ * or for results a literal struct); NULL when the pieces are separate
+ * arguments. */
+static LLVMTypeRef coerce_type(cg *g, const nc_abi_arg *a, bool is_ret)
+{
+    if (a->npieces == 1) return piece_type(g, &a->pieces[0]);
+    if (a->as_array) return LLVMArrayType2(piece_type(g, &a->pieces[0]), a->npieces);
+    if (!is_ret) return NULL;
+    LLVMTypeRef ts[4];
+    for (unsigned i = 0; i < a->npieces; i++) ts[i] = piece_type(g, &a->pieces[i]);
+    return LLVMStructTypeInContext(g->ctx, ts, a->npieces, 0);
+}
+
+static unsigned attr_kind(const char *name)
+{
+    return LLVMGetEnumAttributeKindForName(name, strlen(name));
+}
+
+typedef struct c_sig {
+    LLVMTypeRef ty;
+    /* LLVM parameter index of NovaC parameter i (its first one when split) */
+    unsigned *first;
+} c_sig;
+
+static void add_ext(cg *g, LLVMValueRef fn_or_call, bool call, unsigned idx, nc_abi_ext ext)
+{
+    if (ext == NC_EXT_NONE) return;
+    LLVMAttributeRef at = LLVMCreateEnumAttribute(g->ctx, attr_kind(ext == NC_EXT_SIGN ? "signext" : "zeroext"), 0);
+    if (call) LLVMAddCallSiteAttribute(fn_or_call, idx, at);
+    else LLVMAddAttributeAtIndex(fn_or_call, idx, at);
+}
+
+/* Attributes of a C function, on its declaration or on a call. */
+static void c_attrs(cg *g, const nc_nir_fn *f, const nc_abi_fn *abi, const unsigned *first, LLVMValueRef v, bool call)
+{
+    void (*add)(LLVMValueRef, LLVMAttributeIndex, LLVMAttributeRef) = call ? LLVMAddCallSiteAttribute : LLVMAddAttributeAtIndex;
+    if (abi->ret.kind == NC_ABI_DIRECT) add_ext(g, v, call, LLVMAttributeReturnIndex, abi->ret.ext);
+    if (abi->ret.kind == NC_ABI_INDIRECT)
+        add(v, 1, LLVMCreateTypeAttribute(g->ctx, attr_kind("sret"), llvm_type(g, f->ret)));
+    for (unsigned i = 0; i < abi->nparams; i++) {
+        const nc_abi_arg *a = &abi->params[i];
+        unsigned idx = first[i] + 1;
+        const nc_type *pt = f->info->params[i];
+        if (a->kind == NC_ABI_DIRECT) add_ext(g, v, call, idx, a->ext);
+        if (a->kind == NC_ABI_INDIRECT && a->byval) {
+            add(v, idx, LLVMCreateTypeAttribute(g->ctx, attr_kind("byval"), llvm_type(g, pt)));
+            add(v, idx, LLVMCreateEnumAttribute(g->ctx, attr_kind("align"), nc_ty_align(pt) > 8 ? nc_ty_align(pt) : 8));
+        }
+        if (a->kind == NC_ABI_COERCE && a->align_stack)
+            add(v, idx, LLVMCreateEnumAttribute(g->ctx, attr_kind("alignstack"), a->align_stack));
+    }
+}
+
+static c_sig c_signature(cg *g, const nc_nir_fn *f, nc_abi_fn *abi)
+{
+    c_sig sig;
+    unsigned cap = f->nparams * 4 + 2;
+    LLVMTypeRef *ps = nc_xcalloc(cap, sizeof *ps);
+    sig.first = nc_xcalloc(f->nparams + 1, sizeof *sig.first);
+    unsigned n = 0;
+    LLVMTypeRef ret;
+    switch (abi->ret.kind) {
+    case NC_ABI_VOID: ret = LLVMVoidTypeInContext(g->ctx); break;
+    case NC_ABI_DIRECT: ret = llvm_type(g, f->ret); break;
+    case NC_ABI_COERCE: ret = coerce_type(g, &abi->ret, true); break;
+    case NC_ABI_INDIRECT:
+    default:
+        ret = LLVMVoidTypeInContext(g->ctx);
+        ps[n++] = g->ptr_ty;
+        break;
+    }
+    for (unsigned i = 0; i < f->nparams; i++) {
+        const nc_abi_arg *a = &abi->params[i];
+        sig.first[i] = n;
+        switch (a->kind) {
+        case NC_ABI_DIRECT: ps[n++] = llvm_type(g, f->info->params[i]); break;
+        case NC_ABI_INDIRECT: ps[n++] = g->ptr_ty; break;
+        case NC_ABI_COERCE: {
+            LLVMTypeRef one = coerce_type(g, a, false);
+            if (one) ps[n++] = one;
+            else
+                for (unsigned k = 0; k < a->npieces; k++) ps[n++] = piece_type(g, &a->pieces[k]);
+            break;
+        }
+        default: break;
+        }
+    }
+    sig.ty = LLVMFunctionType(ret, ps, n, f->info->variadic);
+    free(ps);
+    return sig;
+}
+
+/* An 8-aligned scratch slot for moving an aggregate of type t between its
+ * memory form and its pieces. Pieces may extend past a small aggregate
+ * (a 3-byte struct passed as i64), and an AArch64 HFA may be 32 bytes. */
+static unsigned slot_words(const nc_type *t, const nc_abi_arg *a)
+{
+    uint64_t bytes = nc_ty_size(t);
+    for (unsigned k = 0; k < a->npieces; k++)
+        if (a->pieces[k].offset + 8u > bytes) bytes = a->pieces[k].offset + 8u;
+    return (unsigned)((bytes + 7) / 8);
+}
+
+static LLVMValueRef coerce_slot(cg *g, LLVMBuilderRef b, const nc_type *t, const nc_abi_arg *a)
+{
+    LLVMValueRef slot = LLVMBuildAlloca(b, LLVMArrayType2(g->i64_ty, slot_words(t, a)), "abi.tmp");
+    LLVMSetAlignment(slot, 8);
+    return slot;
+}
+
+static void zero_slot(cg *g, LLVMValueRef slot, const nc_type *t, const nc_abi_arg *a)
+{
+    LLVMBuildStore(g->b, LLVMConstNull(LLVMArrayType2(g->i64_ty, slot_words(t, a))), slot);
+}
+
+static LLVMValueRef at_offset(cg *g, LLVMValueRef base, unsigned off)
+{
+    if (!off) return base;
+    LLVMValueRef idx = LLVMConstInt(g->i64_ty, off, 0);
+    return LLVMBuildGEP2(g->b, LLVMInt8TypeInContext(g->ctx), base, &idx, 1, "");
+}
+
+/* Load the pieces of the aggregate at `slot` into args (n of them, or one
+ * when `one` is non-NULL). */
+static unsigned load_pieces(cg *g, const nc_abi_arg *a, LLVMValueRef slot, LLVMTypeRef one, LLVMValueRef *args)
+{
+    if (one) {
+        args[0] = LLVMBuildLoad2(g->b, one, slot, "");
+        LLVMSetAlignment(args[0], 8);
+        return 1;
+    }
+    for (unsigned k = 0; k < a->npieces; k++) {
+        args[k] = LLVMBuildLoad2(g->b, piece_type(g, &a->pieces[k]), at_offset(g, slot, a->pieces[k].offset), "");
+        LLVMSetAlignment(args[k], a->pieces[k].offset % 8 ? 4 : 8);
+    }
+    return a->npieces;
+}
+
+/* A call to a C function. */
+static void gen_c_call(cg *g, const nc_terminator *t, uint32_t idx)
+{
+    const nc_nir_fn *callee = t->callee;
+    const nc_abi_fn *abi = &g->abis[idx];
+    unsigned cap = t->nargs * 4 + 2, n = 0;
+    LLVMValueRef *args = nc_xcalloc(cap, sizeof *args);
+    unsigned *first = nc_xcalloc(t->nargs + 1, sizeof *first);
+    nc_abi_arg *vabi = nc_xcalloc(t->nargs + 1, sizeof *vabi);
+    if (abi->ret.kind == NC_ABI_INDIRECT) args[n++] = g->allocas[t->dest];
+    for (uint32_t i = 0; i < t->nargs; i++) {
+        const nc_operand *o = &t->args[i];
+        first[i] = n;
+        if (i >= callee->nparams) { /* variadic: scalars only (sema, E7033) */
+            vabi[i] = nc_abi_classify_variadic(g->o->target, o->type);
+            args[n++] = operand(g, o);
+            continue;
+        }
+        const nc_abi_arg *a = &abi->params[i];
+        if (a->kind == NC_ABI_DIRECT) {
+            args[n++] = operand(g, o);
+        } else if (a->kind == NC_ABI_INDIRECT) {
+            /* byval: the callee gets its own copy; otherwise the caller makes it */
+            LLVMValueRef src = operand_addr(g, o);
+            if (a->byval) {
+                args[n++] = src;
+            } else {
+                LLVMValueRef copy = LLVMBuildAlloca(g->entry_b, llvm_type(g, o->type), "abi.copy");
+                LLVMBuildMemCpy(g->b, copy, (unsigned)nc_ty_align(o->type), src, (unsigned)nc_ty_align(o->type),
+                                LLVMConstInt(g->i64_ty, nc_ty_size(o->type), 0));
+                args[n++] = copy;
+            }
+        } else {
+            LLVMValueRef slot = coerce_slot(g, g->entry_b, o->type, a);
+            zero_slot(g, slot, o->type, a);
+            LLVMBuildMemCpy(g->b, slot, 8, operand_addr(g, o), (unsigned)nc_ty_align(o->type),
+                            LLVMConstInt(g->i64_ty, nc_ty_size(o->type), 0));
+            n += load_pieces(g, a, slot, coerce_type(g, a, false), args + n);
+        }
+    }
+    LLVMValueRef r = LLVMBuildCall2(g->b, g->fn_tys[idx], g->fn_vals[idx], args, n, "");
+    c_attrs(g, callee, abi, first, r, true);
+    for (uint32_t i = callee->nparams; i < t->nargs; i++) add_ext(g, r, true, first[i] + 1, vabi[i].ext);
+    if (t->dest != UINT32_MAX) {
+        if (abi->ret.kind == NC_ABI_DIRECT) {
+            LLVMBuildStore(g->b, r, g->allocas[t->dest]);
+        } else if (abi->ret.kind == NC_ABI_COERCE) {
+            LLVMValueRef slot = coerce_slot(g, g->entry_b, callee->ret, &abi->ret);
+            LLVMValueRef st;
+            if (abi->ret.npieces == 1 || abi->ret.as_array) {
+                st = LLVMBuildStore(g->b, r, slot);
+                LLVMSetAlignment(st, 8);
+            } else {
+                for (unsigned k = 0; k < abi->ret.npieces; k++) {
+                    st = LLVMBuildStore(g->b, LLVMBuildExtractValue(g->b, r, k, ""),
+                                        at_offset(g, slot, abi->ret.pieces[k].offset));
+                    LLVMSetAlignment(st, abi->ret.pieces[k].offset % 8 ? 4 : 8);
+                }
+            }
+            const nc_type *rt = callee->ret;
+            LLVMBuildMemCpy(g->b, g->allocas[t->dest], (unsigned)nc_ty_align(rt), slot, 8,
+                            LLVMConstInt(g->i64_ty, nc_ty_size(rt), 0));
+        }
+    }
+    free(args);
+    free(first);
+    free(vabi);
+}
+
+/* The prologue of a C-callable function: its parameters into locals. */
+static void c_prologue(cg *g, uint32_t idx)
+{
+    const nc_nir_fn *f = g->f;
+    const nc_abi_fn *abi = &g->abis[idx];
+    unsigned n = abi->ret.kind == NC_ABI_INDIRECT ? 1 : 0;
+    for (uint32_t p = 0; p < f->nparams; p++) {
+        const nc_abi_arg *a = &abi->params[p];
+        const nc_type *pt = f->info->params[p];
+        LLVMValueRef size = LLVMConstInt(g->i64_ty, nc_ty_size(pt), 0);
+        if (a->kind == NC_ABI_DIRECT) {
+            LLVMBuildStore(g->b, LLVMGetParam(g->fv, n++), g->allocas[p]);
+        } else if (a->kind == NC_ABI_INDIRECT) {
+            LLVMBuildMemCpy(g->b, g->allocas[p], (unsigned)nc_ty_align(pt), LLVMGetParam(g->fv, n++), 8, size);
+        } else {
+            LLVMValueRef slot = coerce_slot(g, g->b, pt, a);
+            if (coerce_type(g, a, false)) {
+                LLVMValueRef st = LLVMBuildStore(g->b, LLVMGetParam(g->fv, n++), slot);
+                LLVMSetAlignment(st, 8);
+            } else {
+                for (unsigned k = 0; k < a->npieces; k++) {
+                    LLVMValueRef st = LLVMBuildStore(g->b, LLVMGetParam(g->fv, n++), at_offset(g, slot, a->pieces[k].offset));
+                    LLVMSetAlignment(st, a->pieces[k].offset % 8 ? 4 : 8);
+                }
+            }
+            LLVMBuildMemCpy(g->b, g->allocas[p], (unsigned)nc_ty_align(pt), slot, 8, size);
+        }
+    }
+}
+
+/* `return v` from a C-callable function. */
+static void c_return(cg *g, const nc_terminator *t)
+{
+    const nc_abi_fn *abi = g->cur_abi;
+    if (!t->has_value || abi->ret.kind == NC_ABI_VOID) {
+        LLVMBuildRetVoid(g->b);
+        return;
+    }
+    const nc_type *rt = t->value.type;
+    switch (abi->ret.kind) {
+    case NC_ABI_DIRECT: LLVMBuildRet(g->b, operand(g, &t->value)); return;
+    case NC_ABI_INDIRECT:
+        store_operand(g, &t->value, LLVMGetParam(g->fv, 0), false, rt);
+        LLVMBuildRetVoid(g->b);
+        return;
+    default: break;
+    }
+    LLVMValueRef slot = coerce_slot(g, g->entry_b, rt, &abi->ret);
+    zero_slot(g, slot, rt, &abi->ret);
+    LLVMBuildMemCpy(g->b, slot, 8, operand_addr(g, &t->value), (unsigned)nc_ty_align(rt),
+                    LLVMConstInt(g->i64_ty, nc_ty_size(rt), 0));
+    const nc_abi_arg *a = &abi->ret;
+    LLVMTypeRef one = a->npieces == 1 || a->as_array ? coerce_type(g, a, true) : NULL;
+    LLVMValueRef parts[4];
+    load_pieces(g, a, slot, one, parts);
+    if (one) {
+        LLVMBuildRet(g->b, parts[0]);
+        return;
+    }
+    LLVMTypeRef st = coerce_type(g, a, true);
+    LLVMValueRef v = LLVMGetUndef(st);
+    for (unsigned k = 0; k < a->npieces; k++) v = LLVMBuildInsertValue(g->b, v, parts[k], k, "");
+    LLVMBuildRet(g->b, v);
+}
+
 static void gen_term(cg *g, const nc_terminator *t)
 {
     set_loc(g, t->span);
@@ -595,7 +890,9 @@ static void gen_term(cg *g, const nc_terminator *t)
     case NC_TERM_GOTO: LLVMBuildBr(B, g->bbs[t->target]); break;
     case NC_TERM_BRANCH: LLVMBuildCondBr(B, operand(g, &t->cond), g->bbs[t->target], g->bbs[t->other]); break;
     case NC_TERM_RETURN:
-        if (t->has_value && indirect(t->value.type)) {
+        if (g->f->is_c) {
+            c_return(g, t);
+        } else if (t->has_value && indirect(t->value.type)) {
             store_operand(g, &t->value, LLVMGetParam(g->fv, 0), false, t->value.type);
             LLVMBuildRetVoid(B);
         } else if (t->has_value) {
@@ -614,6 +911,11 @@ static void gen_term(cg *g, const nc_terminator *t)
     case NC_TERM_CALL: {
         uint32_t idx = 0;
         while (idx < g->m->nfns && g->m->fns[idx] != t->callee) idx++;
+        if (t->callee->is_c) {
+            gen_c_call(g, t, idx);
+            LLVMBuildBr(B, g->bbs[t->target]);
+            break;
+        }
         bool sret = indirect(t->callee->ret);
         uint32_t n = t->nargs + sret;
         LLVMValueRef *args = nc_xcalloc(n ? n : 1, sizeof *args);
@@ -676,7 +978,9 @@ static void gen_function(cg *g, uint32_t idx)
         g->allocas[l] = LLVMBuildAlloca(g->b, llvm_type(g, f->locals[l].type), name);
     }
     bool sret = indirect(f->ret);
-    for (uint32_t p = 0; p < f->nparams; p++) {
+    g->cur_abi = f->is_c ? &g->abis[idx] : NULL;
+    if (f->is_c) c_prologue(g, idx);
+    for (uint32_t p = 0; p < f->nparams && !f->is_c; p++) {
         const nc_type *pt = f->locals[p].type;
         LLVMValueRef arg = LLVMGetParam(g->fv, p + sret);
         if (indirect(pt))
@@ -739,6 +1043,7 @@ static void const_bytes(const nc_expr *e, const nc_type *t, uint8_t *buf)
         const_bytes(e->u.convert.operand, t, buf);
         return;
     }
+    if (e->kind == NC_E_CSTRING) nc_ice("codegen", "a C string in a static union is not supported");
     if (e->kind != NC_E_AGGREGATE) nc_ice("codegen", "static initialiser is not constant");
     for (uint32_t i = 0; i < e->u.agg.nelems; i++) {
         if (nc_ty_is_array(t)) const_bytes(e->u.agg.elems[i], t->elem, buf + i * nc_ty_size(t->elem));
@@ -751,6 +1056,7 @@ static LLVMValueRef const_init(cg *g, const nc_expr *e, const nc_type *t)
 {
     LLVMTypeRef ty = llvm_type(g, t);
     if (!e || e->kind == NC_E_NULL) return LLVMConstNull(ty);
+    if (e->kind == NC_E_CSTRING) return cstring(g, e->u.str);
     if (e->cval.kind != NC_CV_NONE) return const_value(g, e->cval, t);
     if (e->kind == NC_E_IMPLICIT) return const_init(g, e->u.convert.operand, t);
     if (e->kind != NC_E_AGGREGATE) nc_ice("codegen", "static initialiser is not constant");
@@ -782,7 +1088,8 @@ static void gen_statics(cg *g)
             init = const_init(g, st->init, st->type);
         }
         char name[512];
-        mangle(g, st->name, name, sizeof name);
+        if (st->export_symbol) snprintf(name, sizeof name, "%s", nc_sym_str(&g->s->strtab, st->export_symbol));
+        else mangle(g, st->name, name, sizeof name);
         LLVMValueRef gv = LLVMAddGlobal(g->mod, LLVMTypeOf(init), name);
         LLVMSetInitializer(gv, init);
         LLVMSetGlobalConstant(gv, st->is_const);
@@ -799,6 +1106,11 @@ static bool gen_main_wrapper(cg *g)
     for (uint32_t i = 0; i < g->m->nfns; i++) {
         const nc_nir_fn *f = g->m->fns[i];
         if (strcmp(nc_sym_str(&g->s->strtab, f->name), "main") != 0) continue;
+        if (f->is_c) { /* extern "C" main is the C entry point itself */
+            if (f->nparams == 0 && f->ret->kind == NC_TY_PRIM && f->ret->prim == NC_PRIM_I32) return true;
+            nc_diag_error(&g->s->diag, f->span, "E8005", "`main` must be declared `i32 main()` (or `int main(void)`)");
+            return false;
+        }
         if (f->nparams != 0 || f->ret->kind != NC_TY_PRIM || f->ret->prim != NC_PRIM_I32) {
             nc_diag_error(&g->s->diag, f->span, "E8005", "`main` must be declared `i32 main()` (or `int main(void)`)");
             return false;
@@ -887,13 +1199,32 @@ bool nc_codegen(nc_session *s, const nc_nir_module *m, const nc_codegen_options 
     gen_statics(&g);
     g.fn_vals = nc_xcalloc(m->nfns ? m->nfns : 1, sizeof *g.fn_vals);
     g.fn_tys = nc_xcalloc(m->nfns ? m->nfns : 1, sizeof *g.fn_tys);
+    g.abis = nc_xcalloc(m->nfns ? m->nfns : 1, sizeof *g.abis);
     for (uint32_t i = 0; i < m->nfns; i++) {
         const nc_nir_fn *f = m->fns[i];
+        if (f->is_c) {
+            nc_abi_fn *abi = &g.abis[i];
+            abi->params = nc_xcalloc(f->nparams + 1, sizeof *abi->params);
+            nc_abi_classify_fn(o->target, f->ret, f->info->params, f->nparams, abi);
+            c_sig sig = c_signature(&g, f, abi);
+            g.fn_tys[i] = sig.ty;
+            const char *sym = nc_sym_str(&s->strtab, f->info->symbol);
+            /* An import may already be declared, e.g. by the panic handler (`abort`). */
+            LLVMValueRef fv = f->is_import ? LLVMGetNamedFunction(g.mod, sym) : NULL;
+            if (!fv) fv = LLVMAddFunction(g.mod, sym, sig.ty);
+            g.fn_vals[i] = fv;
+            LLVMSetLinkage(fv, LLVMExternalLinkage);
+            if (!f->is_import) common_fn_attrs(&g, fv);
+            else add_attr(&g, fv, "nounwind");
+            c_attrs(&g, f, abi, sig.first, fv, false);
+            free(sig.first);
+            continue;
+        }
         bool sret = indirect(f->ret);
         LLVMTypeRef *ps = nc_xcalloc(f->nparams + 1, sizeof *ps);
         if (sret) ps[0] = g.ptr_ty;
         for (uint32_t p = 0; p < f->nparams; p++)
-            ps[p + sret] = indirect(f->locals[p].type) ? g.ptr_ty : llvm_type(&g, f->locals[p].type);
+            ps[p + sret] = indirect(f->info->params[p]) ? g.ptr_ty : llvm_type(&g, f->info->params[p]);
         g.fn_tys[i] = LLVMFunctionType(sret ? LLVMVoidTypeInContext(g.ctx) : llvm_type(&g, f->ret), ps,
                                        f->nparams + sret, 0);
         free(ps);
@@ -903,7 +1234,8 @@ bool nc_codegen(nc_session *s, const nc_nir_module *m, const nc_codegen_options 
         LLVMSetLinkage(g.fn_vals[i], f->is_public ? LLVMExternalLinkage : LLVMInternalLinkage);
         common_fn_attrs(&g, g.fn_vals[i]);
     }
-    for (uint32_t i = 0; i < m->nfns; i++) gen_function(&g, i);
+    for (uint32_t i = 0; i < m->nfns; i++)
+        if (!m->fns[i]->is_import) gen_function(&g, i);
     if (!gen_main_wrapper(&g)) {
         ok = false;
         goto done;
@@ -961,6 +1293,8 @@ done:
     free(g.fn_vals);
     free(g.fn_tys);
     free(g.static_vals);
+    for (uint32_t i = 0; g.abis && i < m->nfns; i++) free(g.abis[i].params);
+    free(g.abis);
     free(g.agg_keys);
     free(g.agg_types);
     LLVMDisposeBuilder(g.b);

@@ -11,17 +11,18 @@
 extern char **environ;
 
 bool nc_link(nc_session *s, const nc_target *t, const char *linker, const char *const *objects, int nobjects,
-             const char *output)
+             const char *const *extra, int nextra, const char *output)
 {
     char cmd[128];
     if (linker) snprintf(cmd, sizeof cmd, "%s", linker);
     else if (nc_target_is_host(t)) snprintf(cmd, sizeof cmd, "cc");
     else snprintf(cmd, sizeof cmd, "%sgcc", t->cross_prefix);
 
-    char **argv = nc_xcalloc((size_t)nobjects + 4, sizeof *argv);
+    char **argv = nc_xcalloc((size_t)nobjects + (size_t)nextra + 4, sizeof *argv);
     int n = 0;
     argv[n++] = cmd;
     for (int i = 0; i < nobjects; i++) argv[n++] = (char *)objects[i];
+    for (int i = 0; i < nextra; i++) argv[n++] = (char *)extra[i];
     argv[n++] = "-o";
     argv[n++] = (char *)output;
     argv[n] = NULL;

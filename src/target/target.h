@@ -6,6 +6,9 @@
 
 #include <stdbool.h>
 
+/* The C calling convention (NOVAC_ABI.md §5). */
+typedef enum nc_c_abi { NC_CABI_SYSV_X86_64, NC_CABI_AAPCS64, NC_CABI_LP64D } nc_c_abi;
+
 typedef struct nc_target {
     const char *name;         /* --target value */
     const char *triple;       /* LLVM triple */
@@ -17,6 +20,11 @@ typedef struct nc_target {
     const char *sysroot;      /* emulator library prefix (QEMU_LD_PREFIX) */
     bool implemented;
     int phase;                /* when not implemented: the phase that adds it */
+    nc_c_abi c_abi;
+    bool char_signed;         /* C `char` (core.ffi.c_char): signed on x86-64, unsigned on AArch64 and RISC-V Linux */
+    /* Aggregates may cross `extern "C"` by value only once tests/abi passes
+     * for the target (E7032 otherwise). */
+    bool abi_verified;
 } nc_target;
 
 /* NULL if unknown. */

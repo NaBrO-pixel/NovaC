@@ -24,6 +24,10 @@ typedef struct nc_fn_info {
     const nc_type **params;
     bool *param_const;
     uint32_t nparams;
+    bool is_c;        /* extern "C": the C calling convention and an unmangled symbol */
+    bool is_import;   /* extern "C" without a body: defined in C, unsafe to call */
+    bool variadic;    /* `...` (imports only) */
+    nc_sym symbol;    /* is_c: the linker symbol (@link_name, @export, or the name) */
 } nc_fn_info;
 
 /* A module-level `static`. Its initialiser is a checked constant
@@ -36,6 +40,7 @@ typedef struct nc_static_info {
     bool is_const;   /* `static const T x`: immutable, readable from safe code */
     bool is_public;
     nc_expr *init;   /* NULL until resolved */
+    nc_sym export_symbol; /* @export("sym"): an unmangled external symbol, or 0 */
     nc_layout_state state;
 } nc_static_info;
 

@@ -320,13 +320,7 @@ static nc_decl *parse_top_decl(nc_parser *p, attr_vec *attrs)
     case NC_T_KW_IMPL: unsupported_decl(p, d, "impl", 5); break;
     case NC_T_KW_INTERFACE: unsupported_decl(p, d, "interface", 6); break;
     case NC_T_KW_IMPORT: unsupported_decl(p, d, "import", 6); break;
-    case NC_T_KW_EXTERN:
-        if (nc_p_peek(p, 1)->kind == NC_T_STRING_LIT && nc_p_peek(p, 2)->kind == NC_T_LBRACE) {
-            unsupported_decl(p, d, "extern block", 4);
-            break;
-        }
-        parse_function(p, d);
-        break;
+    case NC_T_KW_EXTERN: parse_function(p, d); break;
     case NC_T_KW_MODULE:
         nc_p_error(p, t->span, "E2001", "the module declaration must be the first declaration in the file");
         d->kind = NC_D_UNSUPPORTED;
@@ -345,6 +339,44 @@ static nc_decl *parse_top_decl(nc_parser *p, attr_vec *attrs)
     }
     d->span = nc_span_join(d->span, nc_p_prev(p)->span);
     return d;
+}
+
+typedef NC_VEC(nc_decl *) decl_vec;
+
+/* extern "C" { prototypes } (NOVAC_ABI.md §11.1): each becomes a function
+ * declaration of its own. */
+static void parse_extern_block(nc_parser *p, attr_vec *outer, decl_vec *decls)
+{
+    if (outer->len) nc_p_error(p, outer->data[0].span, "E2001", "attributes cannot apply to an `extern` block");
+    outer->len = 0;
+    nc_p_advance(p); /* extern */
+    nc_sym abi = nc_p_advance(p)->v.sym;
+    nc_p_advance(p); /* { */
+    attr_vec attrs = {0};
+    while (!nc_p_at(p, NC_T_RBRACE) && !nc_p_at(p, NC_T_EOF)) {
+        uint32_t before = p->pos;
+        parse_attrs(p, &attrs);
+        nc_decl *d = nc_p_alloc(p, sizeof *d);
+        d->span = attrs.len ? attrs.data[0].span : nc_p_cur_span(p);
+        store_attrs(p, &attrs, &d->attrs, &d->nattrs);
+        attrs.len = 0;
+        d->is_public = nc_p_accept(p, NC_T_KW_PUBLIC);
+        if (nc_p_at(p, NC_T_KW_EXTERN)) nc_p_error(p, nc_p_cur_span(p), "E2001", "`extern` is already given by the block");
+        parse_function(p, d);
+        d->u.fn.has_extern = true;
+        d->u.fn.in_extern_block = true;
+        d->u.fn.extern_abi = abi;
+        if (d->u.fn.body)
+            nc_p_error(p, d->u.fn.name_span, "E2001", "a function in an `extern` block is a declaration: end it with ';'");
+        nc_vec_push(decls, d);
+        if (p->panic) {
+            nc_p_skip_decl(p);
+            p->panic = false;
+        }
+        if (p->pos == before) nc_p_advance(p);
+    }
+    nc_vec_free(&attrs);
+    nc_p_expect(p, NC_T_RBRACE, "'}' to close the `extern` block");
 }
 
 nc_module_ast *nc_parse(nc_session *s, uint32_t file, nc_token_list toks)
@@ -374,7 +406,7 @@ nc_module_ast *nc_parse(nc_session *s, uint32_t file, nc_token_list toks)
         }
     }
 
-    NC_VEC(nc_decl *) decls = {0};
+    decl_vec decls = {0};
     while (!nc_p_at(&p, NC_T_EOF)) {
         uint32_t before = p.pos;
         if (!attrs.len) parse_attrs(&p, &attrs);
@@ -382,6 +414,11 @@ nc_module_ast *nc_parse(nc_session *s, uint32_t file, nc_token_list toks)
             if (attrs.len)
                 nc_p_error(&p, attrs.data[attrs.len - 1].span, "E2001", "attribute is not followed by a declaration");
             break;
+        }
+        if (nc_p_at(&p, NC_T_KW_EXTERN) && nc_p_peek(&p, 1)->kind == NC_T_STRING_LIT &&
+            nc_p_peek(&p, 2)->kind == NC_T_LBRACE) {
+            parse_extern_block(&p, &attrs, &decls);
+            continue;
         }
         nc_decl *d = parse_top_decl(&p, &attrs);
         nc_vec_push(&decls, d);

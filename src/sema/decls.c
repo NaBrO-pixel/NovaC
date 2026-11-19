@@ -8,6 +8,7 @@
  * value (E4080) or a typedef / constexpr defined in terms of itself
  * (E3005). */
 #include "sema/sema_internal.h"
+#include "target/target.h"
 
 #include <string.h>
 
@@ -34,6 +35,8 @@ unsigned nc_sema_attrs(nc_sema *sm, const nc_attr *a, uint32_t n, unsigned allow
         unsigned flag = strcmp(name, "packed") == 0  ? NC_ATTR_PACKED
                         : strcmp(name, "repr") == 0  ? NC_ATTR_REPR
                         : strcmp(name, "mode") == 0  ? NC_ATTR_MODE
+                        : strcmp(name, "export") == 0  ? NC_ATTR_EXPORT
+                        : strcmp(name, "link_name") == 0 ? NC_ATTR_LINK_NAME
                                                      : 0;
         if (!flag) {
             nc_diag_error(NC_DIAG(sm), a[i].span, "E9001", "attribute '@%s' is not implemented in this version", name);
@@ -46,6 +49,14 @@ unsigned nc_sema_attrs(nc_sema *sm, const nc_attr *a, uint32_t n, unsigned allow
         if (flag == NC_ATTR_PACKED && a[i].has_parens) {
             nc_diag_error(NC_DIAG(sm), a[i].span, "E3041", "'@packed' takes no arguments");
             continue;
+        }
+        if (flag == NC_ATTR_EXPORT || flag == NC_ATTR_LINK_NAME) {
+            const nc_expr *arg = a[i].nargs == 1 ? a[i].args[0].value : NULL;
+            if (!arg || arg->kind != NC_E_STRING || nc_sym_len(&sm->s->strtab, arg->u.str) == 0) {
+                nc_diag_error(NC_DIAG(sm), a[i].span, "E3041", "'@%s' takes one argument, the symbol name as a string",
+                              name);
+                continue;
+            }
         }
         if (flag == NC_ATTR_MODE) {
             const nc_expr *arg = a[i].nargs == 1 ? a[i].args[0].value : NULL;
@@ -69,6 +80,98 @@ unsigned nc_sema_attrs(nc_sema *sm, const nc_attr *a, uint32_t n, unsigned allow
         flags |= flag;
     }
     return flags;
+}
+
+nc_sym nc_sema_attr_string(nc_sema *sm, const nc_attr *a, uint32_t n, const char *name)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        if (strcmp(nc_sema_sym(sm, a[i].name), name) != 0 || a[i].nargs != 1) continue;
+        const nc_expr *arg = a[i].args[0].value;
+        if (arg && arg->kind == NC_E_STRING) return arg->u.str;
+    }
+    return 0;
+}
+
+/* ---- core.ffi (D-045) ---------------------------------------------------------------- */
+
+const nc_type *nc_sema_ffi_type(nc_sema *sm, const char *name)
+{
+    static const struct {
+        const char *name;
+        nc_prim prim;
+    } ints[] = {
+        {"c_schar", NC_PRIM_I8},      {"c_uchar", NC_PRIM_U8},    {"c_short", NC_PRIM_I16},
+        {"c_ushort", NC_PRIM_U16},    {"c_int", NC_PRIM_I32},     {"c_uint", NC_PRIM_U32},
+        {"c_long", NC_PRIM_I64},      {"c_ulong", NC_PRIM_U64},   {"c_longlong", NC_PRIM_I64},
+        {"c_ulonglong", NC_PRIM_U64}, {"c_size_t", NC_PRIM_USIZE}, {"c_ssize_t", NC_PRIM_ISIZE},
+    };
+    if (strncmp(name, "c_", 2) != 0) return NULL;
+    for (size_t i = 0; i < sizeof ints / sizeof ints[0]; i++)
+        if (strcmp(ints[i].name, name) == 0) return nc_ty_prim(ints[i].prim); /* LP64: every version-1 target */
+    if (strcmp(name, "c_char") == 0) {
+        bool sgn = sm->s->target ? sm->s->target->char_signed : true;
+        return nc_ty_prim(sgn ? NC_PRIM_I8 : NC_PRIM_U8);
+    }
+    if (strcmp(name, "c_void") == 0) {
+        if (!sm->s->c_void) {
+            /* An opaque struct: usable only behind a pointer (NOVAC_TYPE_SYSTEM.md §2.5). */
+            nc_aggregate *agg = nc_arena_alloc(&sm->s->arena, sizeof *agg);
+            agg->name = nc_intern_cstr(&sm->s->strtab, "c_void");
+            agg->span = NC_NO_SPAN;
+            agg->opaque = true;
+            sm->s->c_void = nc_ty_new_aggregate(sm->s, agg);
+        }
+        return sm->s->c_void;
+    }
+    return NULL;
+}
+
+/* Why t cannot cross a C boundary, or NULL. `top`: a parameter or result
+ * itself rather than a field. */
+static const char *ffi_problem(nc_sema *sm, const nc_type *t, bool top, const nc_type **culprit)
+{
+    *culprit = t;
+    switch (t->kind) {
+    case NC_TY_PRIM:
+    case NC_TY_PTR: return NULL;
+    case NC_TY_ENUM:
+        return t->en->decl->u.en.underlying ? NULL : "an enum needs an explicit underlying type, such as `: c_int`, to match C";
+    case NC_TY_ARRAY:
+        if (top) return "C passes arrays as pointers; pass a pointer to the first element";
+        return ffi_problem(sm, t->elem, false, culprit);
+    case NC_TY_STRUCT:
+    case NC_TY_UNION:
+        if (t->agg->packed) return "a @packed struct has no C calling convention; pass a pointer to it";
+        if (t->agg->nfields == 0) return "an empty struct has no C equivalent";
+        for (uint32_t i = 0; i < t->agg->nfields; i++) {
+            const char *why = ffi_problem(sm, t->agg->fields[i].type, false, culprit);
+            if (why) return why;
+        }
+        return NULL;
+    default: return NULL;
+    }
+}
+
+bool nc_sema_check_ffi(nc_sema *sm, const nc_type *t, nc_span span, const char *what)
+{
+    if (nc_ty_is_error(t) || nc_ty_is_void(t)) return true;
+    const nc_type *culprit;
+    const char *why = ffi_problem(sm, t, true, &culprit);
+    if (why) {
+        nc_diag_error(NC_DIAG(sm), span, "E7030", "%s has type '%s', which cannot cross a C boundary", what, nc_type_name(t));
+        if (culprit != t) nc_diag_note(NC_DIAG(sm), span, "because it contains '%s'", nc_type_name(culprit));
+        nc_diag_help(NC_DIAG(sm), "%s", why);
+        return false;
+    }
+    const nc_target *tg = sm->s->target;
+    if (nc_ty_is_aggregate(t) && tg && !tg->abi_verified) {
+        nc_diag_error(NC_DIAG(sm), span, "E7032",
+                      "%s passes '%s' by value, but the C ABI lowering for %s is not verified yet", what, nc_type_name(t),
+                      tg->name);
+        nc_diag_help(NC_DIAG(sm), "pass a pointer instead (NOVAC_ABI.md §5)");
+        return false;
+    }
+    return true;
 }
 
 /* ---- the module namespace ---------------------------------------------------------- */
@@ -236,7 +339,7 @@ const nc_type *nc_sema_resolve_type(nc_sema *sm, const nc_type_expr *te, bool *i
         return nc_ty_ptr(sm->s, inner, pointee_const);
     }
     case NC_TE_REF: what = "reference types are"; phase = 5; break;
-    case NC_TE_FN: what = "function pointer types are"; phase = 4; break;
+    case NC_TE_FN: what = "function pointer types are"; phase = 6; break; /* with optional<> (D-046) */
     case NC_TE_PATH: {
         const nc_path *p = &te->u.path.path;
         const char *first = nc_sema_sym(sm, p->parts[0]);
@@ -270,6 +373,8 @@ const nc_type *nc_sema_resolve_type(nc_sema *sm, const nc_type_expr *te, bool *i
             nc_diag_error(NC_DIAG(sm), te->span, "E3006", "'%s' is not a type", first);
             return nc_ty_error();
         }
+        const nc_type *ffi = nc_sema_ffi_type(sm, first);
+        if (ffi) return ffi;
         nc_diag_error(NC_DIAG(sm), te->span, "E3001", "unknown type '%s'", first);
         return nc_ty_error();
     }
@@ -511,7 +616,8 @@ nc_static_info *nc_sema_static(nc_sema *sm, nc_module_sym *ms)
     if (st->state != NC_LAYOUT_NONE) return st;
     st->state = NC_LAYOUT_BUSY;
     nc_decl *d = st->decl;
-    nc_sema_attrs(sm, d->attrs, d->nattrs, 0);
+    if (nc_sema_attrs(sm, d->attrs, d->nattrs, NC_ATTR_EXPORT) & NC_ATTR_EXPORT)
+        st->export_symbol = nc_sema_attr_string(sm, d->attrs, d->nattrs, "export");
     const nc_type *t = nc_sema_value_type(sm, d->u.var.type, &st->is_const, false, "a static");
     st->type = t;
     if (nc_ty_is_error(t)) {

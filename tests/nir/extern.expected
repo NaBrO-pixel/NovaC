@@ -1,0 +1,21 @@
+module ext
+
+extern "C" fn printf(const i8*, ...) -> i32; // symbol printf
+
+extern "C" fn absolute(i64) -> i64; // symbol labs
+
+fn extern "C" public exported(_0: i32) -> i32 {
+  bb0:
+    return _0
+}
+
+fn use(_0: i64) -> i64 {
+    let _1: i32;
+    let _2: i64;
+  bb0:
+    _1 = call printf(c"%ld\x0a", _0, const 2.5f64) -> bb1
+  bb1:
+    _2 = call absolute(_0) -> bb2
+  bb2:
+    return _2
+}

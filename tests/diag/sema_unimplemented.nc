@@ -1,6 +1,5 @@
 // Recognised constructs of later phases are rejected with E9001.
 @inline i32 attr() { return 0; }       // ERROR E9001
-extern "C" i32 ext(i32 a);             // ERROR E9001
 T id<T>(T x) { return x; }             // ERROR E9001, ERROR E3001, ERROR E3001
 void decl_only();                      // ERROR E9001
 struct Gen<T> { i32 x; }               // ERROR E9001

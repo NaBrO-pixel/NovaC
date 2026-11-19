@@ -770,6 +770,38 @@ local outlives it without a diagnostic, and using it then is undefined
 behaviour of the unsafe code that dereferences it, as in Rust's raw
 pointers.
 
+## D-045 — The `core.ffi` names are predeclared until modules exist
+
+**Status:** Accepted (Phase 4)
+
+**Context.** C interoperability needs `c_int`, `c_char`, `c_void` and the
+other C types (NOVAC_SPEC.md §10: `core.ffi`), but `import` arrives in
+Phase 6. The alternatives: make them keywords; predeclare them; or wait
+for modules.
+
+**Decision.** They are predeclared in every module, as aliases of the
+matching NovaC integer types (`c_char` depends on the target) and an opaque
+struct `c_void`. A module's own declaration of the same name takes
+precedence. When `core.ffi` exists, the predeclared names become imports
+of it in the prelude, so programs keep compiling.
+
+## D-046 — Function pointer types move to Phase 6, with `optional`
+
+**Status:** Accepted (Phase 4)
+
+**Context.** NOVAC_TYPE_SYSTEM.md §3.5 makes function pointers non-null,
+with `optional<R fn(P...)>` for nullable ones, so that C callbacks that may
+be NULL have a sound type. `optional` is Phase 6. Introducing non-null
+function pointers now would leave nullable C callbacks unrepresentable.
+Alternatively they could be nullable raw pointers now, but that would
+change their meaning later.
+
+**Decision.** Function pointer types and calls through them are
+implemented in Phase 6 together with `optional`. Phase 4 C interoperability
+covers direct calls in both directions. APIs that take callbacks (`qsort`,
+`signal`) wait for Phase 6; `@callconv(c)` on function types moves with
+them.
+
 ---
 
 ## Outstanding questions

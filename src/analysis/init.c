@@ -182,6 +182,7 @@ bool nc_check_init(nc_session *s, const nc_nir_module *m)
     memset(&c, 0, sizeof c);
     c.s = s;
     c.ok = true;
-    for (uint32_t i = 0; i < m->nfns; i++) check_fn(&c, m->fns[i]);
+    for (uint32_t i = 0; i < m->nfns; i++)
+        if (!m->fns[i]->is_import) check_fn(&c, m->fns[i]);
     return c.ok;
 }

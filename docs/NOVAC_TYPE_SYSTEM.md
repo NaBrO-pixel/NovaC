@@ -181,7 +181,8 @@ integer constants or a `bitset` type (planned).
 
 ### 3.5 Function types: `R fn(P...)`
 
-Function pointers. Never null (use `optional<R fn(P...)>`, which has
+Planned for Phase 6, with `optional` (D-046). Function pointers. Never
+null (use `optional<R fn(P...)>`, which has
 pointer size). The calling convention is part of the type:
 `@callconv(c) i32 fn(i32)` is distinct from `i32 fn(i32)` (D-018).
 Functions convert implicitly to their function-pointer type.

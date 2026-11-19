@@ -15,8 +15,6 @@ static const struct {
     {"--module-path=", true, false, 6},
     {"--feature=", true, false, 6},
     {"-T", false, true, 7},
-    {"-L", true, false, 4},
-    {"-l", true, false, 4},
     {"-flto=", true, false, 8},
     {"-fprofile-generate", false, false, 8},
     {"-fprofile-use=", true, false, 8},
@@ -46,6 +44,7 @@ void nc_print_help(FILE *out)
           "  --target=<name>       x86_64-linux-gnu (default), aarch64-linux-gnu, riscv64-linux-gnu\n"
           "  -mcpu=<cpu>, -mattr=<features>   CPU and features beyond the baseline\n"
           "  --linker=<command>    linker driver (default: cc, or <triple>-gcc when cross-compiling)\n"
+          "  -l<lib>, -L<dir>, file.o, file.a   passed to the linker, in order\n"
           "  -fpanic=verbose|minimal   panic messages with or without text and file name\n"
           "  --max-mode=safe|controlled|kernel   reject modules with a higher @mode\n"
           "\n"
@@ -102,6 +101,12 @@ static bool emit_kind(const char *k, nc_action *a)
     return false;
 }
 
+static bool is_link_input(const char *a)
+{
+    const char *dot = strrchr(a, '.');
+    return dot && (strcmp(dot, ".o") == 0 || strcmp(dot, ".a") == 0 || strcmp(dot, ".so") == 0);
+}
+
 bool nc_parse_options(int argc, char **argv, nc_options *o, nc_diag *d)
 {
     memset(o, 0, sizeof *o);
@@ -110,7 +115,8 @@ bool nc_parse_options(int argc, char **argv, nc_options *o, nc_diag *d)
     o->opt = '0';
     o->target = nc_target_host();
     o->inputs = calloc((size_t)(argc > 0 ? argc : 1), sizeof *o->inputs);
-    if (!o->inputs) return false;
+    o->link_args = calloc((size_t)(argc > 0 ? argc : 1), sizeof *o->link_args);
+    if (!o->inputs || !o->link_args) return false;
     bool ok = true;
     bool conflict = false;
     bool explicit_action = false;
@@ -119,7 +125,12 @@ bool nc_parse_options(int argc, char **argv, nc_options *o, nc_diag *d)
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (only_inputs || a[0] != '-' || a[1] == '\0') {
-            o->inputs[o->ninputs++] = a;
+            if (is_link_input(a)) o->link_args[o->nlink_args++] = a; /* objects and libraries go to the linker */
+            else o->inputs[o->ninputs++] = a;
+            continue;
+        }
+        if ((a[1] == 'l' || a[1] == 'L') && a[2] != '\0') {
+            o->link_args[o->nlink_args++] = a;
             continue;
         }
         nc_action act;

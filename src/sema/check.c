@@ -430,23 +430,42 @@ bool nc_check_stmt(nc_sema *sm, nc_stmt *s)
 
 static nc_fn_info *declare_function(nc_sema *sm, nc_decl *d)
 {
-    nc_sema_attrs(sm, d->attrs, d->nattrs, 0);
-    if (d->u.fn.has_extern)
-        nc_diag_error(NC_DIAG(sm), d->span, "E9001", "`extern` functions are not implemented in this version (Phase 4)");
+    const char *name = nc_sema_sym(sm, d->u.fn.name);
+    bool is_c = d->u.fn.has_extern;
+    bool is_import = is_c && !d->u.fn.body;
+    unsigned allowed = !is_c ? 0 : is_import ? NC_ATTR_LINK_NAME : NC_ATTR_EXPORT;
+    unsigned attrs = nc_sema_attrs(sm, d->attrs, d->nattrs, allowed);
+    if (is_c && d->u.fn.extern_abi && strcmp(nc_sema_sym(sm, d->u.fn.extern_abi), "C") != 0) {
+        nc_diag_error(NC_DIAG(sm), d->span, "E7034", "unsupported ABI \"%s\": only `extern \"C\"` exists",
+                      nc_sema_sym(sm, d->u.fn.extern_abi));
+        is_c = false;
+    }
     if (d->u.fn.is_unsafe && sm->mode == NC_MODE_SAFE) {
         nc_diag_error(NC_DIAG(sm), d->u.fn.name_span, "E6001", "`unsafe` functions are not allowed in a safe module");
         nc_diag_help(NC_DIAG(sm), "declare the module `@mode(controlled) module name;` (NOVAC_MEMORY_MODEL.md §2)");
     }
     if (d->u.fn.ngeneric)
         nc_diag_error(NC_DIAG(sm), d->u.fn.generic_span, "E9001", "generic functions are not implemented in this version (Phase 6)");
-    if (d->u.fn.variadic)
-        nc_diag_error(NC_DIAG(sm), d->span, "E9001", "variadic functions are not implemented in this version (Phase 4)");
+    if (d->u.fn.variadic && !is_import) {
+        nc_diag_error(NC_DIAG(sm), d->u.fn.name_span, "E7035",
+                      "only C functions declared with `extern \"C\"` can be variadic; NovaC cannot define one");
+        nc_diag_help(NC_DIAG(sm), "pass a pointer and a count, or a slice once they exist (Phase 6)");
+    }
     if (!d->u.fn.body && !d->u.fn.has_extern)
         nc_diag_error(NC_DIAG(sm), d->u.fn.name_span, "E9001",
                       "function declarations without a body are not implemented in this version (Phase 4)");
 
     nc_fn_info *fn = nc_arena_alloc(&sm->s->arena, sizeof *fn);
     fn->decl = d;
+    fn->is_c = is_c;
+    fn->is_import = is_c && is_import;
+    fn->variadic = d->u.fn.variadic && fn->is_import;
+    if (is_c) {
+        nc_sym sym = attrs & NC_ATTR_LINK_NAME ? nc_sema_attr_string(sm, d->attrs, d->nattrs, "link_name")
+                     : attrs & NC_ATTR_EXPORT  ? nc_sema_attr_string(sm, d->attrs, d->nattrs, "export")
+                                               : 0;
+        fn->symbol = sym ? sym : d->u.fn.name;
+    }
     bool c;
     fn->ret = nc_sema_value_type(sm, d->u.fn.ret, &c, true, "a return value");
     fn->nparams = d->u.fn.nparams;
@@ -465,6 +484,15 @@ static nc_fn_info *declare_function(nc_sema *sm, nc_decl *d)
             t = nc_ty_error();
         }
         fn->params[i] = t;
+    }
+    if (is_c) {
+        char what[160];
+        for (uint32_t i = 0; i < fn->nparams; i++) {
+            snprintf(what, sizeof what, "parameter '%s' of '%s'", nc_sema_sym(sm, d->u.fn.params[i].name), name);
+            nc_sema_check_ffi(sm, fn->params[i], d->u.fn.params[i].span, what);
+        }
+        snprintf(what, sizeof what, "the result of '%s'", name);
+        nc_sema_check_ffi(sm, fn->ret, d->u.fn.ret->span, what);
     }
     nc_vec_push(&sm->fns, fn);
     d->u.fn.info = fn;
@@ -496,6 +524,50 @@ static void check_function(nc_sema *sm, nc_fn_info *fn)
     sm->cur_fn = NULL;
 }
 
+/* Unmangled symbols (extern "C" functions, @export statics) must be unique
+ * and must not use the implementation's reserved prefixes. */
+static void check_symbols(nc_sema *sm)
+{
+    NC_VEC(nc_sym) syms = {0};
+    NC_VEC(nc_span) spans = {0};
+    /* A NovaC `main` gets a C `main` wrapper (NOVAC_ABI.md §7). */
+    nc_fn_info *main_fn = nc_sema_find_fn(sm, nc_intern_cstr(&sm->s->strtab, "main"));
+    if (main_fn && !main_fn->is_c) {
+        nc_vec_push(&syms, nc_intern_cstr(&sm->s->strtab, "main"));
+        nc_vec_push(&spans, main_fn->decl->u.fn.name_span);
+    }
+    for (size_t i = 0; i < sm->msyms.len; i++) {
+        nc_module_sym *ms = &sm->msyms.data[i];
+        nc_sym sym = 0;
+        nc_span span = NC_NO_SPAN;
+        if (ms->kind == NC_MSYM_FN && ms->info && ((nc_fn_info *)ms->info)->is_c) {
+            sym = ((nc_fn_info *)ms->info)->symbol;
+            span = ms->decl->u.fn.name_span;
+        } else if (ms->kind == NC_MSYM_STATIC && ((nc_static_info *)ms->info)->export_symbol) {
+            sym = ((nc_static_info *)ms->info)->export_symbol;
+            span = ms->decl->u.var.name_span;
+        }
+        if (!sym) continue;
+        const char *str = nc_sema_sym(sm, sym);
+        if (strncmp(str, "__nova", 6) == 0 || strncmp(str, "_NC", 3) == 0) {
+            nc_diag_error(NC_DIAG(sm), span, "E3020", "the symbol '%s' is reserved for the implementation", str);
+            continue;
+        }
+        bool dup = false;
+        for (size_t k = 0; k < syms.len && !dup; k++)
+            if (syms.data[k] == sym) {
+                nc_diag_error(NC_DIAG(sm), span, "E3002", "the symbol '%s' is defined twice", str);
+                nc_diag_note(NC_DIAG(sm), spans.data[k], "it is first defined here");
+                dup = true;
+            }
+        if (dup) continue;
+        nc_vec_push(&syms, sym);
+        nc_vec_push(&spans, span);
+    }
+    nc_vec_free(&syms);
+    nc_vec_free(&spans);
+}
+
 bool nc_sema_check(nc_session *s, nc_module_ast *m)
 {
     nc_sema sm;
@@ -523,6 +595,7 @@ bool nc_sema_check(nc_session *s, nc_module_ast *m)
         if (fn->decl->u.fn.body) nc_vec_push(&to_check, fn);
     }
     nc_sema_resolve_decls(&sm);
+    check_symbols(&sm);
     for (size_t i = 0; i < to_check.len; i++) check_function(&sm, to_check.data[i]);
 
     nc_vec_free(&to_check);

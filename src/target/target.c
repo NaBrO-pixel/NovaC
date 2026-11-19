@@ -5,17 +5,17 @@
 static const nc_target targets[] = {
     /* Hosted Linux (Phase 3). Baselines from D-023. */
     {"x86_64-linux-gnu", "x86_64-unknown-linux-gnu", "x86-64", "", "", "x86_64-linux-gnu-", "qemu-x86_64",
-     "/usr/x86_64-linux-gnu", true, 3},
+     "/usr/x86_64-linux-gnu", true, 3, NC_CABI_SYSV_X86_64, true, true},
     {"aarch64-linux-gnu", "aarch64-unknown-linux-gnu", "generic", "+v8a", "", "aarch64-linux-gnu-", "qemu-aarch64",
-     "/usr/aarch64-linux-gnu", true, 3},
+     "/usr/aarch64-linux-gnu", true, 3, NC_CABI_AAPCS64, false, true},
     {"riscv64-linux-gnu", "riscv64-unknown-linux-gnu", "generic-rv64", "+m,+a,+f,+d,+c", "lp64d",
-     "riscv64-linux-gnu-", "qemu-riscv64", "/usr/riscv64-linux-gnu", true, 3},
+     "riscv64-linux-gnu-", "qemu-riscv64", "/usr/riscv64-linux-gnu", true, 3, NC_CABI_LP64D, false, true},
     /* Recognised, not yet implemented. */
-    {"x86_64-novaris", "x86_64-unknown-linux-gnu", "x86-64", "", "", "", NULL, NULL, false, 4},
-    {"x86_64-unknown-none", "x86_64-unknown-none-elf", "x86-64", "", "", "", NULL, NULL, false, 7},
-    {"x86_64-novaris-kernel", "x86_64-unknown-none-elf", "x86-64", "", "", "", NULL, NULL, false, 7},
-    {"aarch64-unknown-none", "aarch64-unknown-none-elf", "generic", "", "", "", NULL, NULL, false, 7},
-    {"riscv64-unknown-none", "riscv64-unknown-none-elf", "generic-rv64", "", "", "", NULL, NULL, false, 7},
+    {"x86_64-novaris", "x86_64-unknown-linux-gnu", "x86-64", "", "", "", NULL, NULL, false, 4, NC_CABI_SYSV_X86_64, true, false},
+    {"x86_64-unknown-none", "x86_64-unknown-none-elf", "x86-64", "", "", "", NULL, NULL, false, 7, NC_CABI_SYSV_X86_64, true, false},
+    {"x86_64-novaris-kernel", "x86_64-unknown-none-elf", "x86-64", "", "", "", NULL, NULL, false, 7, NC_CABI_SYSV_X86_64, true, false},
+    {"aarch64-unknown-none", "aarch64-unknown-none-elf", "generic", "", "", "", NULL, NULL, false, 7, NC_CABI_AAPCS64, false, false},
+    {"riscv64-unknown-none", "riscv64-unknown-none-elf", "generic-rv64", "", "", "", NULL, NULL, false, 7, NC_CABI_LP64D, false, false},
 };
 
 const nc_target *nc_target_find(const char *name)

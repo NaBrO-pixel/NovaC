@@ -389,6 +389,7 @@ contents are a primitive type the parser reports **E2031** with the fix-it
 | E1030 | unterminated string or character literal |
 | E1031 | invalid escape sequence (including `\u{...}` in a character literal) |
 | E1032 | invalid character literal (empty, more than one character, non-ASCII) |
+| E1033 | NUL byte (`\0`, `\x00`) in a C string literal `c"..."` |
 | E2001 | unexpected token (generic) |
 | E2010 | chained relational/equality operator (`a < b < c`) |
 | E2020 | C-style array declarator (`int a[4]`) — fix-it `i32[4] a` |

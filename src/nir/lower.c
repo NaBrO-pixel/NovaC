@@ -772,6 +772,14 @@ static nc_operand lower_expr(lowerer *lx, nc_expr *e)
     case NC_E_ARROW:
     case NC_E_INDEX: return op_place(lower_place(lx, e), e->span);
     case NC_E_NULL: return op_zero(e->type, e->span);
+    case NC_E_CSTRING: {
+        nc_operand o = {0};
+        o.kind = NC_OP_CSTRING;
+        o.str = e->u.str;
+        o.type = e->type;
+        o.span = e->span;
+        return o;
+    }
     case NC_E_BUILTIN: {
         nc_operand x = lower_expr(lx, e->u.builtin.operand);
         nc_cast_kind k = e->u.builtin.kind == NC_BUILTIN_ADDR            ? NC_CAST_PTR_TO_INT
@@ -1115,6 +1123,8 @@ nc_nir_module *nc_nir_lower(nc_session *s, nc_module_ast *m)
         ns->is_const = st->is_const;
         ns->is_public = st->is_public;
         ns->init = st->init;
+        ns->export_symbol = st->export_symbol;
+        if (st->export_symbol) ns->is_public = true;
     }
     for (uint32_t i = 0; i < m->ndecls; i++) {
         nc_decl *d = m->decls[i];
@@ -1126,6 +1136,9 @@ nc_nir_module *nc_nir_lower(nc_session *s, nc_module_ast *m)
         f->is_public = d->is_public;
         f->ret = f->info->ret;
         f->nparams = d->u.fn.nparams;
+        f->is_c = f->info->is_c;
+        f->is_import = f->info->is_import;
+        if (f->is_c) f->is_public = true; /* C symbols are external */
         nm->fns[nm->nfns++] = f;
     }
 
@@ -1133,7 +1146,8 @@ nc_nir_module *nc_nir_lower(nc_session *s, nc_module_ast *m)
     memset(&lx, 0, sizeof lx);
     lx.s = s;
     lx.m = nm;
-    for (uint32_t i = 0; i < nm->nfns; i++) lower_function(&lx, nm->fns[i]);
+    for (uint32_t i = 0; i < nm->nfns; i++)
+        if (!nm->fns[i]->is_import) lower_function(&lx, nm->fns[i]);
     nc_vec_free(&lx.vars);
     nc_vec_free(&lx.loops);
     return nm;

@@ -70,7 +70,21 @@ void nc_sema_collect(nc_sema *sm);
 /* Resolve every non-function declaration (layouts, values), reporting errors
  * even in unused ones. */
 void nc_sema_resolve_decls(nc_sema *sm);
-enum { NC_ATTR_PACKED = 1u << 0, NC_ATTR_REPR = 1u << 1, NC_ATTR_MODE = 1u << 2 };
+enum {
+    NC_ATTR_PACKED = 1u << 0,
+    NC_ATTR_REPR = 1u << 1,
+    NC_ATTR_MODE = 1u << 2,
+    NC_ATTR_EXPORT = 1u << 3,
+    NC_ATTR_LINK_NAME = 1u << 4,
+};
+/* The string argument of an accepted `@name("...")` attribute, or 0. */
+nc_sym nc_sema_attr_string(nc_sema *sm, const nc_attr *a, uint32_t n, const char *name);
+/* The core.ffi type `name` (c_int, c_char, c_void, ...), or NULL. Until
+ * modules exist these names are predeclared in every module (D-045). */
+const nc_type *nc_sema_ffi_type(nc_sema *sm, const char *name);
+/* Reports E7030 (and E7032) unless t may appear in an extern "C"
+ * signature; `what` names the position ("parameter 'x' of 'f'"). */
+bool nc_sema_check_ffi(nc_sema *sm, const nc_type *t, nc_span span, const char *what);
 /* Is the current code in an unsafe context? If not, reports E6003 for
  * `what` ("dereferencing a raw pointer") and returns false. */
 bool nc_sema_require_unsafe(nc_sema *sm, nc_span span, const char *what);

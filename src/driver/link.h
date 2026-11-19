@@ -10,6 +10,6 @@
 
 /* Reports E8002 (linker failed) or E8003 (linker not found). */
 bool nc_link(nc_session *s, const nc_target *t, const char *linker, const char *const *objects, int nobjects,
-             const char *output);
+             const char *const *extra, int nextra, const char *output);
 
 #endif

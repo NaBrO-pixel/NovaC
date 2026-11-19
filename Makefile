@@ -78,6 +78,7 @@ test-here: $(BUILD)/ncc $(BUILD)/unit_tests
 	$(BUILD)/unit_tests
 	$(PYTHON) tests/run_tests.py --ncc $(BUILD)/ncc $(if $(filter 1,$(UPDATE)),--update)
 	$(PYTHON) tests/run_tests.py --ncc $(BUILD)/ncc --selftest
+	$(PYTHON) tests/abi/gen.py --check
 	$(PYTHON) tools/check_docs.py
 
 test-all:

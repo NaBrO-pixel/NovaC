@@ -6,6 +6,25 @@ released versions yet.
 
 ## [Unreleased]
 
+### Added — Phase 4c: C interoperability
+
+- `extern "C"` imports (blocks and single declarations) and exports,
+  `@link_name`, `@export` on functions and statics, variadic calls with
+  explicit promotions, `c"..."` strings, predeclared `core.ffi` types
+  (D-045), and FFI-safety checks (E7030, E7033, E7034, E7035, E1033).
+- C calling-convention lowering for x86-64 System V, AArch64 and RISC-V
+  LP64D (`src/target/abi.c`), calibrated against Clang 18.
+- `tests/abi/`: generated conformance tests calling between NovaC and
+  Clang-compiled C in both directions, on all three targets.
+- The test runner's `// STDOUT:` and `// C-SOURCE:` directives; the driver
+  passes `-l`, `-L` and `.o`/`.a`/`.so` inputs to the linker.
+- Function pointer types move to Phase 6 with `optional` (D-046).
+
+### Fixed during Phase 4c
+
+- The scratch slot for an aggregate passed in pieces was 16 bytes, but an
+  AArch64 HFA of four doubles is 32: found by the conformance tests.
+
 ### Added — Phase 4b: raw pointers, `unsafe` and modes
 
 - Raw pointers `T*` and `const T*`, `null`, dereference, `->`, indexing

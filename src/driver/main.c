@@ -113,7 +113,8 @@ static bool compile(nc_session *s, const nc_options *o)
             nc_diag_help(&s->diag, "to compile a module without `main`, use -c");
             ok = false;
         } else {
-            ok = nc_link(s, o->target, o->linker, (const char *const *)temps, ntemps, o->output ? o->output : "a.out");
+            ok = nc_link(s, o->target, o->linker, (const char *const *)temps, ntemps, o->link_args, o->nlink_args,
+                         o->output ? o->output : "a.out");
         }
     }
     for (int i = 0; i < ntemps; i++) {
@@ -144,10 +145,12 @@ int main(int argc, char **argv)
         s.diag.werror = opts.werror;
         s.diag.error_limit = opts.error_limit;
         s.max_mode = opts.max_mode;
+        s.target = opts.target;
         ok = compile(&s, &opts);
         status = ok && !s.diag.errors ? 0 : 1;
     }
     free(opts.inputs);
+    free(opts.link_args);
     nc_session_free(&s);
     return status;
 }
