@@ -41,10 +41,13 @@ void nc_print_help(FILE *out)
           "  -O0 -O1 -O2 -O3 -Os -Oz -Ofast   optimisation (default -O0); -Ofast relaxes\n"
           "                        floating point only and keeps every safety check\n"
           "  -g, -g0               DWARF line tables on / off\n"
-          "  --target=<name>       x86_64-linux-gnu (default), aarch64-linux-gnu, riscv64-linux-gnu\n"
+          "  --target=<name>       x86_64-linux-gnu (default), aarch64-linux-gnu, riscv64-linux-gnu,\n"
+          "                        x86_64-novaris (static, against LibNovaC)\n"
           "  -mcpu=<cpu>, -mattr=<features>   CPU and features beyond the baseline\n"
           "  --linker=<command>    linker driver (default: cc, or <triple>-gcc when cross-compiling)\n"
           "  -l<lib>, -L<dir>, file.o, file.a   passed to the linker, in order\n"
+          "  --libnovac=<dir>      LibNovaC build directory (crt0.o, libNovaC.a) for x86_64-novaris;\n"
+          "                        default: $NOVAC_LIBNOVAC\n"
           "  -fpanic=verbose|minimal   panic messages with or without text and file name\n"
           "  --max-mode=safe|controlled|kernel   reject modules with a higher @mode\n"
           "\n"
@@ -209,6 +212,8 @@ bool nc_parse_options(int argc, char **argv, nc_options *o, nc_diag *d)
                 nc_diag_error(d, NC_NO_SPAN, "E0003", "invalid value '%s' for -fpanic", a + 8);
                 ok = false;
             }
+        } else if (strncmp(a, "--libnovac=", 11) == 0) {
+            o->libnovac = a + 11;
         } else if (strncmp(a, "--max-mode=", 11) == 0) {
             const char *v = a + 11;
             if (strcmp(v, "safe") == 0) o->max_mode = 0;

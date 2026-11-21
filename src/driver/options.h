@@ -35,6 +35,7 @@ typedef struct nc_options {
     const char *cpu;      /* -mcpu= */
     const char *features; /* -mattr= */
     const char *linker;   /* --linker= */
+    const char *libnovac; /* --libnovac= (or NOVAC_LIBNOVAC): directory with crt0.o and libNovaC.a */
     bool help;
     bool version;
     bool werror;

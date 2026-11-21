@@ -6,16 +6,17 @@ with compile-time ownership and borrow checking, LLVM-based native code
 generation, C ABI interoperability, and freestanding compilation for
 kernels and drivers. It has no garbage collector and requires no runtime.
 
-> **Project status: native compilation (Phase 3).**
-> `ncc` compiles a first subset of the language (functions, primitive
-> types, variables, arithmetic, control flow) to native executables for
-> x86-64, AArch64 and RISC-V 64 Linux through LLVM. Every integer
-> overflow, division by zero, oversized shift and out-of-range conversion
-> panics instead of being undefined. Programs cannot yet call C or print
-> anything: they communicate through their exit status. Most of the
-> language in the documents below is designed but not implemented;
-> [docs/FEATURE_STATUS.md](docs/FEATURE_STATUS.md) is the authoritative
-> record of what works.
+> **Project status: C interoperability (Phase 4).**
+> `ncc` compiles functions, primitive types, structs, unions, enums,
+> arrays, `switch`, raw pointers and `unsafe` code to native executables
+> for x86-64, AArch64 and RISC-V 64 Linux through LLVM, and to static
+> NovarisOS executables against LibNovaC. Programs call C and are called
+> by it through the C calling convention of each target, verified against
+> Clang. Every integer overflow, division by zero, oversized shift,
+> out-of-range conversion and out-of-bounds index panics instead of being
+> undefined. Ownership and borrowing, modules and generics are designed
+> but not implemented; [docs/FEATURE_STATUS.md](docs/FEATURE_STATUS.md) is
+> the authoritative record of what works.
 
 ## What exists today
 
@@ -25,16 +26,17 @@ kernels and drivers. It has no garbage collector and requires no runtime.
 | Phase 1 language specification | [docs/](docs/) |
 | Phase 2 front end: lexer, parser, name resolution, type checker, diagnostics | [src/](src/), tests in [tests/](tests/) |
 | Phase 3 back end: NIR with explicit checks, initialisation analysis, LLVM code generation, linking, cross-compilation, debug line tables | [src/nir/](src/nir/), [src/codegen/](src/codegen/) |
+| Phase 4: aggregates, enums, `switch`, raw pointers, modes and `unsafe`, `extern "C"` with per-target C ABI lowering, the `x86_64-novaris` target | [src/target/abi.c](src/target/abi.c), conformance tests in [tests/abi/](tests/abi/) |
 | Documentation consistency checker | `tools/check_docs.py` (`make check-docs`) |
 
-Not implemented yet: C interoperability, structs, pointers and `unsafe`
-(Phase 4), ownership and borrowing
+Not implemented yet: references, ownership and borrowing
 (Phase 5), modules, generics, slices and the libraries (Phase 6), kernel
 features (Phase 7), concurrency and optimisation (Phase 8). The front end
 recognises these constructs and rejects them with error E9001, naming the
 phase that will implement them.
 
-Next: **Phase 4**, C interoperability with structs, pointers and `unsafe`.
+Next: **Phase 5**, memory safety: references, moves, destructors and the
+borrow checker.
 See [docs/NOVAC_ROADMAP.md](docs/NOVAC_ROADMAP.md).
 
 ## Trying it
@@ -49,6 +51,18 @@ build/release-cc/ncc -O2 examples/phase2.nc -o phase2 && ./phase2; echo $?
 
 ```bash
 build/release-cc/ncc --target=aarch64-linux-gnu examples/phase2.nc -o phase2-arm64
+```
+
+```bash
+build/release-cc/ncc -O2 examples/phase4.nc -o phase4 && ./phase4
+```
+
+For NovarisOS, build LibNovaC (`make lib` in its checkout) and link
+against it; the result is a static executable that also runs on x86-64
+Linux:
+
+```bash
+build/release-cc/ncc --target=x86_64-novaris --libnovac=<libnovac>/build/target examples/phase4.nc -o phase4
 ```
 
 `--dump-tokens`, `--dump-ast`, `--emit=typed`, `--emit=nir` and

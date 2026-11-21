@@ -5,17 +5,21 @@
 static const nc_target targets[] = {
     /* Hosted Linux (Phase 3). Baselines from D-023. */
     {"x86_64-linux-gnu", "x86_64-unknown-linux-gnu", "x86-64", "", "", "x86_64-linux-gnu-", "qemu-x86_64",
-     "/usr/x86_64-linux-gnu", true, 3, NC_CABI_SYSV_X86_64, true, true},
+     "/usr/x86_64-linux-gnu", true, 3, NC_CABI_SYSV_X86_64, true, true, false},
     {"aarch64-linux-gnu", "aarch64-unknown-linux-gnu", "generic", "+v8a", "", "aarch64-linux-gnu-", "qemu-aarch64",
-     "/usr/aarch64-linux-gnu", true, 3, NC_CABI_AAPCS64, false, true},
+     "/usr/aarch64-linux-gnu", true, 3, NC_CABI_AAPCS64, false, true, false},
     {"riscv64-linux-gnu", "riscv64-unknown-linux-gnu", "generic-rv64", "+m,+a,+f,+d,+c", "lp64d",
-     "riscv64-linux-gnu-", "qemu-riscv64", "/usr/riscv64-linux-gnu", true, 3, NC_CABI_LP64D, false, true},
+     "riscv64-linux-gnu-", "qemu-riscv64", "/usr/riscv64-linux-gnu", true, 3, NC_CABI_LP64D, false, true, false},
+    /* NovarisOS userspace (Phase 4): the Linux syscall ABI, static and
+     * non-PIE against LibNovaC (NOVAC_ABI.md §10.1). It runs on an x86-64
+     * Linux host too, so it needs no emulator there. */
+    {"x86_64-novaris", "x86_64-unknown-linux-gnu", "x86-64", "", "", "", NULL, NULL, true, 4, NC_CABI_SYSV_X86_64, true,
+     true, true},
     /* Recognised, not yet implemented. */
-    {"x86_64-novaris", "x86_64-unknown-linux-gnu", "x86-64", "", "", "", NULL, NULL, false, 4, NC_CABI_SYSV_X86_64, true, false},
-    {"x86_64-unknown-none", "x86_64-unknown-none-elf", "x86-64", "", "", "", NULL, NULL, false, 7, NC_CABI_SYSV_X86_64, true, false},
-    {"x86_64-novaris-kernel", "x86_64-unknown-none-elf", "x86-64", "", "", "", NULL, NULL, false, 7, NC_CABI_SYSV_X86_64, true, false},
-    {"aarch64-unknown-none", "aarch64-unknown-none-elf", "generic", "", "", "", NULL, NULL, false, 7, NC_CABI_AAPCS64, false, false},
-    {"riscv64-unknown-none", "riscv64-unknown-none-elf", "generic-rv64", "", "", "", NULL, NULL, false, 7, NC_CABI_LP64D, false, false},
+    {"x86_64-unknown-none", "x86_64-unknown-none-elf", "x86-64", "", "", "", NULL, NULL, false, 7, NC_CABI_SYSV_X86_64, true, false, false},
+    {"x86_64-novaris-kernel", "x86_64-unknown-none-elf", "x86-64", "", "", "", NULL, NULL, false, 7, NC_CABI_SYSV_X86_64, true, false, false},
+    {"aarch64-unknown-none", "aarch64-unknown-none-elf", "generic", "", "", "", NULL, NULL, false, 7, NC_CABI_AAPCS64, false, false, false},
+    {"riscv64-unknown-none", "riscv64-unknown-none-elf", "generic-rv64", "", "", "", NULL, NULL, false, 7, NC_CABI_LP64D, false, false, false},
 };
 
 const nc_target *nc_target_find(const char *name)
@@ -45,5 +49,5 @@ bool nc_target_is_host(const nc_target *t)
 
 const char *nc_target_list(void)
 {
-    return "x86_64-linux-gnu, aarch64-linux-gnu, riscv64-linux-gnu";
+    return "x86_64-linux-gnu, aarch64-linux-gnu, riscv64-linux-gnu, x86_64-novaris";
 }

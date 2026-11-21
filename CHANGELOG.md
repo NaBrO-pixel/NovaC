@@ -6,6 +6,15 @@ released versions yet.
 
 ## [Unreleased]
 
+### Added — Phase 4d: NovarisOS userspace target
+
+- `--target=x86_64-novaris`: static, non-PIE executables linked with `ld`
+  against LibNovaC's `crt0.o` and `libNovaC.a` (`--libnovac=` or
+  `NOVAC_LIBNOVAC`; E8006 when missing).
+- `make test LIBNOVAC_SRC=<checkout>` builds LibNovaC out of tree and runs
+  `tests/run` and `tests/abi` for the target on the Linux host.
+- `examples/phase4.nc`.
+
 ### Added — Phase 4c: C interoperability
 
 - `extern "C"` imports (blocks and single declarations) and exports,

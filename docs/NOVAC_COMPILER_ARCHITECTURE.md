@@ -167,6 +167,7 @@ Warnings use `W` with the same ranges. Codes defined in this document:
 | E8003 | the linker could not be started (not installed, or a wrong `--linker=`) |
 | E8004 | an executable was requested but no input defines `main` |
 | E8005 | `main` does not have the signature `i32 main()` |
+| E8006 | the `x86_64-novaris` target has no LibNovaC (`--libnovac=`, `NOVAC_LIBNOVAC`) |
 | E8010 | object compiled against a different interface hash of an imported module |
 | E9002 | command-line option recognised but not implemented in this version |
 | E9003 | code generation requested but not implemented (reported by Phase 2 only; retired, never reused) |

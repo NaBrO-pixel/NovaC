@@ -113,8 +113,8 @@ static bool compile(nc_session *s, const nc_options *o)
             nc_diag_help(&s->diag, "to compile a module without `main`, use -c");
             ok = false;
         } else {
-            ok = nc_link(s, o->target, o->linker, (const char *const *)temps, ntemps, o->link_args, o->nlink_args,
-                         o->output ? o->output : "a.out");
+            ok = nc_link(s, o->target, o->linker, o->libnovac, (const char *const *)temps, ntemps, o->link_args,
+                         o->nlink_args, o->output ? o->output : "a.out");
         }
     }
     for (int i = 0; i < ntemps; i++) {

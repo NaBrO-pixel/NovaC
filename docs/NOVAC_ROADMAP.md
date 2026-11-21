@@ -177,8 +177,9 @@ says which).
 Phase 4 is delivered in four steps, each committed with its tests:
 4a aggregates and `switch` (done: F-300); 4b raw pointers and `unsafe`
 (done: F-301, F-302); 4c C interoperability (done: F-303 to F-305;
-function pointers moved to Phase 6, D-046);
-4c C interoperability and ABI lowering; 4d the `x86_64-novaris` target.
+function pointers moved to Phase 6, D-046); 4d the `x86_64-novaris`
+target (done: F-306, verified on the Linux host; running inside
+NovarisOS awaits an image). Phase 4 is complete.
 
 - Structs, unions, enums, fixed arrays, raw pointers, `typedef`, statics,
   `constexpr` items, `switch`.

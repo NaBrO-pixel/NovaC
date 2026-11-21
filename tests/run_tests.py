@@ -31,7 +31,9 @@ run must end with
 the same target (-ffreestanding: no C library headers) and links it in.
 tests/abi holds the C ABI conformance tests, run like tests/run.
 `// NOT-WITH: -Ofast` excludes one optimisation level (for tests of
-semantics that level relaxes). Set NOVAC_CROSS=0 to skip the cross targets. Skipped configurations are
+semantics that level relaxes). Set NOVAC_CROSS=0 to skip the cross targets.
+Set NOVAC_LIBNOVAC to a LibNovaC build directory (crt0.o, libNovaC.a) to
+also run tests/run and tests/abi for x86_64-novaris at -O0 and -O2. Skipped configurations are
 reported, never counted as passes.
 
   --update    rewrite .expected files from the current output (review the diff!)
@@ -169,6 +171,13 @@ SKIPPED = set()
 
 def exec_configs():
     configs = [(None, o) for o in NATIVE_OPTS] + [(None, "-O2 -g")]
+    # NovarisOS userspace: static executables against LibNovaC, which run on
+    # the x86-64 Linux host unchanged (NOVAC_ABI.md §10.1).
+    libnovac = os.environ.get("NOVAC_LIBNOVAC", "")
+    if libnovac and os.path.isfile(os.path.join(libnovac, "libNovaC.a")):
+        configs += [(("x86_64-novaris", None, None), o) for o in CROSS_OPTS]
+    else:
+        SKIPPED.add("x86_64-novaris (set NOVAC_LIBNOVAC to a LibNovaC build directory)")
     if os.environ.get("NOVAC_CROSS", "1") == "0":
         SKIPPED.add("cross targets (NOVAC_CROSS=0)")
         return configs
@@ -209,7 +218,7 @@ def run_exec_case(ncc, path, update):
             c_failed = False
             for k, c in enumerate(c_sources):
                 obj = os.path.join(tmp, f"c{k}.o")
-                triple = cross[0] if cross else "x86_64-linux-gnu"
+                triple = cross[0] if cross and cross[1] else "x86_64-linux-gnu"
                 cc = subprocess.run(["clang", "--target=" + triple, "-ffreestanding", "-O1", "-c", c, "-o", obj],
                                     capture_output=True, text=True, timeout=120)
                 if cc.returncode != 0:
@@ -224,7 +233,7 @@ def run_exec_case(ncc, path, update):
                 continue
             env = dict(os.environ)
             cmd = [exe]
-            if cross:
+            if cross and cross[1]:
                 env["QEMU_LD_PREFIX"] = cross[2]
                 cmd = [cross[1], exe]
             run = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=env)
@@ -310,7 +319,7 @@ DRIVER_CASES = [
     (["--freestanding", "x.nc"], 2, ["E9002"], ""),
     (["-flto=thin", "x.nc"], 2, ["E9002"], ""),
     (["-fstack-protector", "x.nc"], 2, ["E9002"], ""),
-    (["--target=x86_64-novaris", "x.nc"], 2, ["E9002"], ""),
+    (["--target=x86_64-novaris-kernel", "x.nc"], 2, ["E9002"], ""),
     (["--target=x86_64-unknown-none", "x.nc"], 2, ["E9002"], ""),
     (["--target=sparc-sun", "x.nc"], 2, ["E0003"], ""),
     (["-O9", "x.nc"], 2, ["E0003"], ""),
@@ -327,6 +336,7 @@ DRIVER_CASES = [
     (["--target=riscv64-linux-gnu", "-c", "tests/driver/ok2.nc", "-o", "{tmp}/r.o"], 0, [], ""),
     (["tests/driver/ok2.nc", "-o", "{tmp}/nomain"], 1, ["E8004"], ""),
     (["tests/driver/bad_main.nc", "-o", "{tmp}/bad"], 1, ["E8005"], ""),
+    (["tests/driver/ok.nc", "--target=x86_64-novaris", "--libnovac={tmp}", "-o", "{tmp}/nv"], 1, ["E8006"], ""),
     (["--linker=/nonexistent/ncc-linker", "tests/driver/ok.nc", "-o", "{tmp}/x"], 1, ["E8003"], ""),
     (["--linker=false", "tests/driver/ok.nc", "-o", "{tmp}/x"], 1, ["E8002"], ""),
     (["--check", "tests/driver/does-not-exist.nc"], 1, ["E0001"], ""),

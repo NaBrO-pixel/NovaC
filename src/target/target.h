@@ -1,6 +1,7 @@
 /* Compilation targets (NOVAC_ABI.md §2). Phase 3 implements the three
- * hosted Linux targets; the NovarisOS and freestanding targets are
- * recognised and rejected until Phases 4 and 7. */
+ * hosted Linux targets and Phase 4 the NovarisOS userspace target; the
+ * freestanding and kernel targets are recognised and rejected until
+ * Phase 7. */
 #ifndef NC_TARGET_TARGET_H
 #define NC_TARGET_TARGET_H
 
@@ -25,6 +26,9 @@ typedef struct nc_target {
     /* Aggregates may cross `extern "C"` by value only once tests/abi passes
      * for the target (E7032 otherwise). */
     bool abi_verified;
+    /* Linked statically against LibNovaC, not by the C compiler driver
+     * (NOVAC_ABI.md §10.1): non-PIC code, `ld`, crt0.o and libNovaC.a. */
+    bool libnovac;
 } nc_target;
 
 /* NULL if unknown. */

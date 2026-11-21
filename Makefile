@@ -3,6 +3,7 @@
 #   make                 build the compiler: build/release-<cc>/ncc
 #   make test            build with sanitizers and run every test suite
 #   make test-all        `make test` with both CC=gcc and CC=clang
+#   make test LIBNOVAC_SRC=../libnovac   also test x86_64-novaris against LibNovaC
 #   make check-docs      documentation consistency checks
 #   make fuzz            build the libFuzzer harness (Clang only)
 #   make fuzz-run FUZZ_SECONDS=1800   run it on the test corpus
@@ -48,7 +49,7 @@ LIB_OBJ := $(LIB_SRC:%.c=$(BUILD)/%.o)
 UNIT_SRC := $(wildcard tests/unit/*.c)
 UNIT_OBJ := $(UNIT_SRC:%.c=$(BUILD)/%.o)
 
-.PHONY: all test test-here test-all check check-docs unit fuzz fuzz-run clean help
+.PHONY: all test test-here test-all check check-docs unit fuzz fuzz-run clean help libnovac
 
 all: $(BUILD)/ncc
 
@@ -74,9 +75,22 @@ unit: $(BUILD)/unit_tests
 test:
 	$(MAKE) DEBUG=1 test-here
 
-test-here: $(BUILD)/ncc $(BUILD)/unit_tests
+# LIBNOVAC_SRC=<LibNovaC checkout> also runs tests/run and tests/abi for
+# x86_64-novaris, against a LibNovaC built out of tree in build/libnovac.
+LIBNOVAC_SRC ?=
+LIBNOVAC_BUILD := $(abspath build/libnovac)
+ifneq ($(LIBNOVAC_SRC),)
+TEST_ENV := NOVAC_LIBNOVAC=$(LIBNOVAC_BUILD)/target
+LIBNOVAC_DEP := libnovac
+endif
+
+libnovac:
+	@test -n "$(LIBNOVAC_SRC)" || { echo "set LIBNOVAC_SRC to a LibNovaC checkout"; exit 1; }
+	$(MAKE) -C $(LIBNOVAC_SRC) BUILD=$(LIBNOVAC_BUILD) lib
+
+test-here: $(BUILD)/ncc $(BUILD)/unit_tests $(LIBNOVAC_DEP)
 	$(BUILD)/unit_tests
-	$(PYTHON) tests/run_tests.py --ncc $(BUILD)/ncc $(if $(filter 1,$(UPDATE)),--update)
+	$(TEST_ENV) $(PYTHON) tests/run_tests.py --ncc $(BUILD)/ncc $(if $(filter 1,$(UPDATE)),--update)
 	$(PYTHON) tests/run_tests.py --ncc $(BUILD)/ncc --selftest
 	$(PYTHON) tests/abi/gen.py --check
 	$(PYTHON) tools/check_docs.py

@@ -1143,7 +1143,8 @@ static LLVMTargetMachineRef make_target_machine(cg *g, char **err)
                               : g->o->opt == '3' ? LLVMCodeGenLevelAggressive
                                                  : LLVMCodeGenLevelDefault;
     LLVMTargetMachineOptionsSetCodeGenOptLevel(opts, lvl);
-    LLVMTargetMachineOptionsSetRelocMode(opts, LLVMRelocPIC); /* hosted Linux links PIE by default */
+    /* Hosted Linux links PIE by default; LibNovaC programs are static, non-PIE. */
+    LLVMTargetMachineOptionsSetRelocMode(opts, g->o->target->libnovac ? LLVMRelocStatic : LLVMRelocPIC);
     LLVMTargetMachineRef tm = LLVMCreateTargetMachineWithOptions(target, g->o->target->triple, opts);
     LLVMDisposeTargetMachineOptions(opts);
     if (!tm) *err = strdup("cannot create a target machine for this CPU and feature set");

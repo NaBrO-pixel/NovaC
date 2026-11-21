@@ -333,6 +333,18 @@ LibNovaC (commit `244ed54`):
   binary runs on the Linux host and inside NovarisOS, and the transcripts
   must match.
 
+**Implemented in Phase 4d.** `--target=x86_64-novaris` generates non-PIC
+code and links with `ld` as above; LibNovaC's build directory (holding
+`crt0.o` and `libNovaC.a`) is given with `--libnovac=` or the
+`NOVAC_LIBNOVAC` environment variable (E8006 when missing). LibNovaC's
+`_start` calls `main(argc, argv, envp)`, which is NovaC's C `main`
+wrapper, and its `dprintf` and `abort` serve the default panic handler.
+`tests/run` and `tests/abi` run for this target on the Linux host
+(`make test LIBNOVAC_SRC=<checkout>`), so the C ABI lowering is verified
+against LibNovaC-linked C code too. Running the same binaries inside
+NovarisOS and comparing transcripts needs a NovarisOS image and has not
+been done yet.
+
 ### 10.2 Kernel (`x86_64-novaris-kernel`)
 
 Requirements taken from NovarisOS `Makefile.amd64` and `linker64.ld`:
