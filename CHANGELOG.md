@@ -15,6 +15,13 @@ released versions yet.
   `tests/run` and `tests/abi` for the target on the Linux host.
 - `examples/phase4.nc`.
 
+### Verified — Phase 4
+
+- Fuzzing of commit `38e5d0d` (the complete Phase 4 front end, through NIR
+  lowering and analysis): 8,822,252 inputs in 30 minutes, no crash, leak,
+  timeout or sanitizer report. Each step was also fuzzed for 10 minutes
+  (4a: 2,418,971 inputs; 4b: 2,754,551; 4c: 2,758,770), all clean.
+
 ### Added — Phase 4c: C interoperability
 
 - `extern "C"` imports (blocks and single declarations) and exports,
